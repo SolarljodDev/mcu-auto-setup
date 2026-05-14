@@ -352,6 +352,45 @@ function Invoke-ExtractTool {
     Remove-Item $tmp -Recurse -EA SilentlyContinue
 }
 
+# Streaming HTTP download with real-time progress bar.
+# Works with any URL (handles redirects). No dependency on Invoke-WebRequest.
+function Invoke-Download {
+    param([string]$Url, [string]$Dest)
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.UserAgent = "Mozilla/5.0 (setup.ps1)"
+    $req.Timeout   = 30000      # 30 s connect
+    $req.ReadWriteTimeout = 600000  # 10 min data
+    $resp   = $req.GetResponse()
+    $total  = $resp.ContentLength  # -1 if unknown
+    $inStr  = $resp.GetResponseStream()
+    $outStr = [System.IO.File]::Create($Dest)
+    $buf    = New-Object byte[] 65536
+    $read   = 0; $chunk = 0
+    $sw     = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        while (($chunk = $inStr.Read($buf, 0, $buf.Length)) -gt 0) {
+            $outStr.Write($buf, 0, $chunk)
+            $read += $chunk
+            if ($sw.ElapsedMilliseconds -ge 200) {
+                $sw.Restart()
+                $mb = [math]::Round($read / 1MB, 1)
+                if ($total -gt 0) {
+                    $pct  = [int]([math]::Min($read * 100 / $total, 100))
+                    $fill = [int]($pct / 2)
+                    $bar  = ('#' * $fill) + ('-' * (50 - $fill))
+                    $tot  = [math]::Round($total / 1MB, 1)
+                    Write-Host ("`r  [{0}] {1,3}%  {2:N1} / {3:N1} MB" -f $bar, $pct, $mb, $tot) -NoNewline
+                } else {
+                    Write-Host ("`r  {0:N1} MB..." -f $mb) -NoNewline
+                }
+            }
+        }
+    } finally {
+        $outStr.Close(); $inStr.Close(); $resp.Close()
+        Write-Host ("`r" + (' ' * 78) + "`r") -NoNewline  # clear progress line
+    }
+}
+
 # Generates mcu.ld content for the selected MCU architecture and memory layout.
 function New-LinkerScript {
     param(
@@ -762,6 +801,28 @@ if ($userInput -match '^(?:STM32|CH32)\w(\d{3})[A-Za-z]([468BCDEFGbcdefg])') {
     if ($ov -match "^\d+$") { $ramKB = [int]$ov; Write-Host ("  RAM set to {0} KB" -f $ramKB) -ForegroundColor Green }
 }
 
+# ==============================================================
+# STEP 1.5: Compiler optimization level
+# ==============================================================
+Write-Host ""
+Write-Host "Optimization level:" -ForegroundColor Cyan
+Write-Host "  [1]  -O0   None   — no optimization, easiest debugging          (default)"
+Write-Host "  [2]  -O1   Light  — mild, mostly still debuggable"
+Write-Host "  [3]  -Os   Size   — minimize Flash usage  (great for small MCUs)"
+Write-Host "  [4]  -O2   Speed  — balanced speed & size"
+Write-Host "  [5]  -O3   Max    — maximum speed, largest Flash footprint"
+Write-Host ""
+Write-Host "Choose [Enter = 1]:" -ForegroundColor Yellow
+$optPick = Read-Host
+$optFlag = switch ($optPick.Trim()) {
+    '2' { '-O1' }
+    '3' { '-Os' }
+    '4' { '-O2' }
+    '5' { '-O3' }
+    default { '-O0' }
+}
+Write-Host ("  Optimization: {0}" -f $optFlag) -ForegroundColor Green
+
 $gccKey  = if ($mcu.Arch -eq "ARM") { "ARM_GCC" } else { "RISCV_GCC" }
 $gccTool = $TOOL_CATALOG[$gccKey]
 
@@ -926,7 +987,7 @@ if ($downloads.Count -gt 0) {
         Write-Host ""
         Write-Host ("[{0}]  Downloading..." -f $t.Name) -ForegroundColor Cyan
         $zip = Join-Path $env:TEMP "mcu_dl.zip"
-        Invoke-WebRequest $t.Url -OutFile $zip -UseBasicParsing
+        Invoke-Download $t.Url $zip
         Invoke-ExtractTool $t $zip
         Write-Host ("[{0}]  Done  ->  {1}" -f $t.Name, $t.DestDir) -ForegroundColor Green
 
@@ -971,7 +1032,7 @@ if (-not (Test-Path $sdkFlag)) {
             $zipUrl = "https://github.com/$($mcu.Repo)/archive/refs/heads/$zipBranch.zip"
             Remove-Item $tmpDir -Recurse -EA SilentlyContinue
             try {
-                Invoke-WebRequest $zipUrl -OutFile $zip -UseBasicParsing -EA Stop
+                Invoke-Download $zipUrl $zip
             } catch {
                 continue
             }
@@ -1036,7 +1097,7 @@ if (-not (Test-Path $sdkFlag)) {
             $tmpDir = Join-Path $env:TEMP "mcu_sdk_tmp"
             Remove-Item $tmpDir -Recurse -EA SilentlyContinue
             try {
-                Invoke-WebRequest $url -OutFile $zip -UseBasicParsing -ErrorAction Stop
+                Invoke-Download $url $zip
             } catch {
                 continue
             }
@@ -1134,13 +1195,16 @@ if ($mcu.Arch -eq "ARM" -and $mcu.NeedsCmsis) {
         )
         New-Item -ItemType Directory $cmsisDest -Force | Out-Null
         $failed = @()
-        foreach ($f in $cmsisFiles) {
+        for ($fi = 0; $fi -lt $cmsisFiles.Count; $fi++) {
+            $f = $cmsisFiles[$fi]
+            Write-Host ("`r  [{0,2}/{1}]  {2,-36}" -f ($fi + 1), $cmsisFiles.Count, $f) -NoNewline
             try {
-                Invoke-WebRequest "$baseUrl/$f" -OutFile "$cmsisDest\$f" -UseBasicParsing -ErrorAction Stop
+                Invoke-Download "$baseUrl/$f" "$cmsisDest\$f"
             } catch {
                 $failed += $f
             }
         }
+        Write-Host ""
         if ($failed.Count -eq 0) {
             New-Item -ItemType File -Path $cmsisFlag -Force | Out-Null
             Write-Host ("  {0} files" -f $cmsisFiles.Count) -ForegroundColor DarkGray
@@ -1231,21 +1295,34 @@ include(cmake/mcu_config.cmake)
 if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/tool_paths.cmake")
     include("${CMAKE_SOURCE_DIR}/cmake/tool_paths.cmake")
 endif()
+# build_config.cmake: user-editable compile flags (optimization, warnings, C std, etc.)
+if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/build_config.cmake")
+    include("${CMAKE_SOURCE_DIR}/cmake/build_config.cmake")
+endif()
 
 project(__PROJ__ C ASM)
 
-set(CPU_FLAGS "${MCU_CPU_FLAGS}")
-if(MCU_FPU_FLAGS)
-    string(APPEND CPU_FLAGS " ${MCU_FPU_FLAGS}")
+# CPU flags: override via BUILD_CPU_FLAGS_OVERRIDE in build_config.cmake, else use MCU defaults
+if(BUILD_CPU_FLAGS_OVERRIDE)
+    set(CPU_FLAGS "${BUILD_CPU_FLAGS_OVERRIDE}")
+else()
+    set(CPU_FLAGS "${MCU_CPU_FLAGS}")
+    if(MCU_FPU_FLAGS)
+        string(APPEND CPU_FLAGS " ${MCU_FPU_FLAGS}")
+    endif()
 endif()
-if(MCU_FLOAT_ABI)
+
+# Float ABI: override via BUILD_FLOAT_ABI_OVERRIDE in build_config.cmake, else use MCU default
+if(BUILD_FLOAT_ABI_OVERRIDE)
+    set(FLOAT_FLAGS "-mfloat-abi=${BUILD_FLOAT_ABI_OVERRIDE}")
+elseif(MCU_FLOAT_ABI)
     set(FLOAT_FLAGS "-mfloat-abi=${MCU_FLOAT_ABI}")
 else()
     set(FLOAT_FLAGS "")
 endif()
 
 set(CMAKE_C_FLAGS
-    "${CPU_FLAGS} ${FLOAT_FLAGS} -Wall -g -O0 -ffunction-sections -fdata-sections"
+    "${CPU_FLAGS} ${FLOAT_FLAGS} ${BUILD_OPT} ${BUILD_C_STD} ${BUILD_WARNINGS} ${BUILD_DEBUG} -ffunction-sections -fdata-sections ${BUILD_EXTRA_DEFINES} ${BUILD_EXTRA_FLAGS}"
     CACHE STRING "" FORCE)
 set(CMAKE_ASM_FLAGS
     "${CPU_FLAGS} ${FLOAT_FLAGS} -x assembler-with-cpp"
@@ -1288,6 +1365,70 @@ add_custom_command(TARGET __PROJ__.elf POST_BUILD
     COMMENT "Firmware size:" VERBATIM)
 '@
 Write-NewFile "$Root\CMakeLists.txt" ($cmakeListsTmpl.Replace('__PROJ__', $projName))
+
+# ---- cmake/build_config.cmake ----
+# Created ONCE — setup.ps1 never overwrites it. Edit freely.
+Write-NewFile "$CmakeDir\build_config.cmake" @"
+# ==============================================================
+# cmake/build_config.cmake
+# User-editable build flags.
+# Edit here — NO need to re-run setup.ps1.
+# Re-run cmake configure (Ctrl+Shift+B) to apply changes.
+# ==============================================================
+
+# ---------- Optimization ----------
+# -O0  None   — no optimization, best for debugging            (default)
+# -O1  Light  — mild optimizations, mostly still debuggable
+# -Os  Size   — minimize Flash usage  (good for space-limited chips)
+# -O2  Speed  — balanced speed and size
+# -O3  Max    — maximum speed, may increase code size
+set(BUILD_OPT "$optFlag")
+
+# ---------- C standard ----------
+# c99 / c11 / c17 / gnu11  (gnu11 = C11 + GCC extensions, recommended)
+set(BUILD_C_STD "-std=gnu11")
+
+# ---------- Warnings ----------
+# -Wall     standard warnings  (recommended minimum)
+# -Wextra   more warnings  (stricter, some false positives possible)
+# -Werror   treat all warnings as errors  (CI-friendly, strict)
+set(BUILD_WARNINGS "-Wall")
+
+# ---------- Debug info ----------
+# -g   full DWARF debug info (needed to step through code in VS Code / GDB)
+# -g0  no debug info         (smaller .elf, cannot debug)
+set(BUILD_DEBUG "-g")
+
+# ---------- Float ABI override ----------
+# Leave empty "" to use the MCU default from mcu_config.cmake.
+# Change when linking mixed libraries (e.g. library compiled with soft, MCU default is hard).
+# ARM options: "soft" | "softfp" | "hard"
+# RISC-V: not used here — float handled by -march (see CPU flags override below).
+set(BUILD_FLOAT_ABI_OVERRIDE "")
+
+# ---------- CPU / ISA flags override ----------
+# Leave empty "" to use the MCU defaults from mcu_config.cmake.
+# Override to enable/disable ISA extensions or change ABI.
+# Both -march and -mabi must be set together as one string.
+# ARM examples:
+#   Cortex-M4 default:  -mcpu=cortex-m4 -mthumb  (set by MCU)
+#   Thumb2 only:        -mcpu=cortex-m4 -mthumb -march=armv7e-m
+# WCH RISC-V examples:
+#   CH32V20x (no FPU, default):  -march=rv32imac  -mabi=ilp32
+#   CH32V20x with FPU:           -march=rv32imafc -mabi=ilp32f
+#   CH32V30x/307 with FPU:       -march=rv32imafc -mabi=ilp32f
+set(BUILD_CPU_FLAGS_OVERRIDE "")
+
+# ---------- Extra preprocessor defines ----------
+# Space-separated, each prefixed with -D
+# Example: "-DDEBUG -DUSE_FULL_ASSERT -DBOARD_REV=2"
+set(BUILD_EXTRA_DEFINES "")
+
+# ---------- Extra compiler flags ----------
+# Anything not covered above.
+# Example: "-fno-exceptions -fno-rtti -Wno-unused-variable"
+set(BUILD_EXTRA_FLAGS "")
+"@
 
 # ---- cmake/toolchain.cmake ----
 # CMAKE_CURRENT_LIST_DIR is the cmake/ folder, reliable even during try_compile.
@@ -1345,6 +1486,139 @@ set(CMAKE_SIZE_UTIL    "${TC}size.exe"    CACHE FILEPATH "size")
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 '@
 
+# ---- build.ps1 ---- (always regenerated so cmake/ninja paths stay current)
+Write-InfraFile "$Root\build.ps1" @"
+#
+# build.ps1 - Pretty CMake build wrapper
+# Auto-generated by setup.ps1. Re-run setup.ps1 to regenerate.
+#
+param([switch]`$Clean)
+
+`$ErrorActionPreference = 'Continue'
+`$root      = `$PSScriptRoot
+`$buildDir  = "`$root\build\cmake"
+`$toolPaths = "`$root\cmake\tool_paths.cmake"
+
+# ---- locate cmake.exe and ninja from cmake/tool_paths.cmake ----
+`$cmakeExe = `$null
+`$ninjaExe = `$null
+if (Test-Path `$toolPaths) {
+    foreach (`$ln in Get-Content `$toolPaths) {
+        if (`$ln -match 'CMAKE_EXE\s+"([^"]+)"')        { `$cmakeExe = `$Matches[1] }
+        if (`$ln -match 'CMAKE_MAKE_PROGRAM\s+"([^"]+)"') { `$ninjaExe = `$Matches[1] }
+    }
+}
+if (-not `$cmakeExe) {
+    `$cmakeExe = (Get-Command cmake -EA SilentlyContinue)?.Source
+}
+if (-not `$cmakeExe) {
+    Write-Host '  cmake.exe not found - run setup.ps1 first.' -ForegroundColor Red; exit 1
+}
+
+`$projName = Split-Path `$root -Leaf
+
+# ---- Header ----
+Write-Host ''
+Write-Host ('  ┌─ Build: {0} ' -f `$projName).PadRight(50, '─') + '┐' -ForegroundColor Cyan
+Write-Host ''
+
+# ---- Configure (fast no-op if nothing changed) ----
+`$confArgs = @('-S', `$root, '-B', `$buildDir, '-G', 'Ninja',
+               '-DCMAKE_TOOLCHAIN_FILE=' + `$root + '\cmake\toolchain.cmake',
+               '-DCMAKE_BUILD_TYPE=Debug', '--log-level=WARNING')
+if (`$ninjaExe) { `$confArgs += '-DCMAKE_MAKE_PROGRAM=' + `$ninjaExe }
+
+`$confOut = & `$cmakeExe @confArgs 2>&1
+`$confOut | Where-Object { `$_ -match '(error|warning|WARN|ERR)' } |
+    ForEach-Object { Write-Host ('  ' + `$_) -ForegroundColor Yellow }
+
+# ---- Build ----
+`$buildArgs = @('--build', `$buildDir)
+if (`$Clean) { `$buildArgs += '--clean-first' }
+
+Write-Host '  [building]' -ForegroundColor DarkCyan
+`$start      = Get-Date
+`$errorCount = 0
+`$warnCount  = 0
+
+& `$cmakeExe @buildArgs 2>&1 | ForEach-Object {
+    `$line = if (`$_ -is [System.Management.Automation.ErrorRecord]) { `$_.Exception.Message } else { `$_.ToString() }
+    if (-not `$line.Trim()) { return }
+
+    if (`$line -match '^\s*\[\s*(\d+)/(\d+)\]') {
+        `$n = [int]`$Matches[1]; `$tot = [int]`$Matches[2]
+        `$pct  = [int](`$n * 100 / `$tot)
+        `$fill = [int](`$pct / 2)
+        `$bar  = ([string]::new([char]0x2588, `$fill)) + ([string]::new([char]0x2591, 50 - `$fill))
+        `$src  = if (`$line -match '([^/\\]+\.(?:c|s|S|cpp))\b') { `$Matches[1] } else { '...' }
+        Write-Host ('  [{0}] {1,3}%  {2}' -f `$bar, `$pct, `$src) -ForegroundColor Cyan
+    } elseif (`$line -match ': error:') {
+        Write-Host `$line -ForegroundColor Red
+        `$errorCount++
+    } elseif (`$line -match ': warning:') {
+        Write-Host `$line -ForegroundColor Yellow
+        `$warnCount++
+    } elseif (`$line -match '^(FAILED:|ninja: build stopped)') {
+        Write-Host ('  ' + `$line) -ForegroundColor Red
+    } else {
+        Write-Host ('  ' + `$line) -ForegroundColor DarkGray
+    }
+}
+`$exitCode = `$LASTEXITCODE
+`$elapsed  = (Get-Date) - `$start
+
+# ---- Size table ----
+`$elfFile = Get-ChildItem "`$buildDir\*.elf" -EA SilentlyContinue | Select-Object -First 1
+if (`$elfFile -and `$exitCode -eq 0) {
+    `$gcBin = `$null; `$gcPfx = `$null
+    if (Test-Path `$toolPaths) {
+        foreach (`$ln in Get-Content `$toolPaths) {
+            if (`$ln -match 'TOOLCHAIN_GCC_BIN\s+"([^"]+)"')    { `$gcBin = `$Matches[1] }
+            if (`$ln -match 'TOOLCHAIN_GCC_PREFIX\s+"([^"]+)"') { `$gcPfx = `$Matches[1] }
+        }
+    }
+    `$sizeExe = if (`$gcBin -and `$gcPfx) { "`$gcBin\`${gcPfx}size.exe" } else { `$null }
+    if (`$sizeExe -and (Test-Path `$sizeExe)) {
+        `$sizeOut = & `$sizeExe `$elfFile.FullName 2>`$null | Select-Object -Skip 1 -First 1
+        if (`$sizeOut -match '^\s*(\d+)\s+(\d+)\s+(\d+)') {
+            `$textSz = [int]`$Matches[1]; `$dataSz = [int]`$Matches[2]; `$bssSz = [int]`$Matches[3]
+            `$flashUsed = `$textSz + `$dataSz
+            `$ramUsed   = `$dataSz + `$bssSz
+            `$flashTotal = 0; `$ramTotal = 0
+            `$ldFile = "`$root\mcu.ld"
+            if (Test-Path `$ldFile) {
+                Get-Content `$ldFile | ForEach-Object {
+                    if (`$_ -match 'FLASH[^:]*LENGTH\s*=\s*(\d+)K') { `$flashTotal = [int]`$Matches[1] * 1024 }
+                    if (`$_ -match '\bRAM\b[^:]*LENGTH\s*=\s*(\d+)K')  { `$ramTotal   = [int]`$Matches[1] * 1024 }
+                }
+            }
+            Write-Host ''
+            if (`$flashTotal -gt 0) {
+                `$fp = [int](`$flashUsed * 100 / `$flashTotal)
+                `$rp = [int](`$ramUsed   * 100 / `$ramTotal)
+                `$fb = ([string]::new([char]0x2588, [int](`$fp / 5))).PadRight(20, [char]0x2591)
+                `$rb = ([string]::new([char]0x2588, [int](`$rp / 5))).PadRight(20, [char]0x2591)
+                Write-Host ('  Flash  [{0}]  {1,6:N0} / {2,6:N0} B  ({3}%)' -f `$fb, `$flashUsed, `$flashTotal, `$fp) -ForegroundColor DarkCyan
+                Write-Host ('  RAM    [{0}]  {1,6:N0} / {2,6:N0} B  ({3}%)' -f `$rb, `$ramUsed,   `$ramTotal,   `$rp) -ForegroundColor DarkCyan
+            } else {
+                Write-Host ('  Flash: {0:N0} B    RAM: {1:N0} B' -f `$flashUsed, `$ramUsed) -ForegroundColor DarkCyan
+            }
+        }
+    }
+}
+
+# ---- Result ----
+Write-Host ''
+if (`$exitCode -eq 0) {
+    `$warn = if (`$warnCount -gt 0) { "  (`$warnCount warning(s))" } else { '' }
+    Write-Host ('  OK{0}  [{1:F1} s]' -f `$warn, `$elapsed.TotalSeconds) -ForegroundColor Green
+} else {
+    Write-Host ('  FAILED  ({0} error(s))' -f `$errorCount) -ForegroundColor Red
+}
+Write-Host ''
+exit `$exitCode
+"@
+
 # OpenOCD target cfg map - used by both tasks.json (flash) and launch.json (debug).
 # For WCH-OpenOCD from MounRiver: bin/wch-riscv.cfg is a single self-contained
 # config that already includes the adapter driver (wlinke) + target.
@@ -1381,26 +1655,10 @@ $cmakeTasksTmpl = @'
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "cmake configure",
-            "type": "shell",
-            "command": "__CMAKE__",
-            "args": [
-                "-S", "${workspaceFolder}",
-                "-B", "${workspaceFolder}/build/cmake",
-                "-G", "Ninja",
-                "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/cmake/toolchain.cmake",
-                "-DCMAKE_MAKE_PROGRAM=__NINJA__",
-                "-DCMAKE_BUILD_TYPE=Debug"
-            ],
-            "group": "build",
-            "problemMatcher": []
-        },
-        {
             "label": "cmake build",
             "type": "shell",
-            "command": "__CMAKE__",
-            "args": ["--build", "${workspaceFolder}/build/cmake"],
-            "dependsOn": ["cmake configure"],
+            "command": "powershell",
+            "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build.ps1"],
             "group": { "kind": "build", "isDefault": true },
             "problemMatcher": {
                 "owner": "gcc",
@@ -1414,9 +1672,23 @@ $cmakeTasksTmpl = @'
         {
             "label": "cmake clean build",
             "type": "shell",
+            "command": "powershell",
+            "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build.ps1", "-Clean"],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "cmake configure",
+            "type": "shell",
             "command": "__CMAKE__",
-            "args": ["--build", "${workspaceFolder}/build/cmake", "--clean-first"],
-            "dependsOn": ["cmake configure"],
+            "args": [
+                "-S", "${workspaceFolder}",
+                "-B", "${workspaceFolder}/build/cmake",
+                "-G", "Ninja",
+                "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/cmake/toolchain.cmake",
+                "-DCMAKE_MAKE_PROGRAM=__NINJA__",
+                "-DCMAKE_BUILD_TYPE=Debug"
+            ],
             "group": "build",
             "problemMatcher": []
         }__FLASH_TASKS__
@@ -1652,7 +1924,8 @@ $toolPathsContent = @"
 # Shared tools folder: $SharedDir
 set(TOOLCHAIN_GCC_BIN    "$gccBinFwd")
 set(TOOLCHAIN_GCC_PREFIX "$gccPrefix")
-set(CMAKE_MAKE_PROGRAM   "$ninjaFwd" CACHE FILEPATH "Ninja" FORCE)
+set(CMAKE_MAKE_PROGRAM   "$ninjaFwd"  CACHE FILEPATH "Ninja"  FORCE)
+set(CMAKE_EXE            "$cmakeFwd" CACHE FILEPATH "CMake"  FORCE)
 $(if ($cmsisDir) { "set(CMSIS_DIR   ""$cmsisDir"" CACHE PATH ""ARM CMSIS Core headers"" FORCE)" })
 $(if ($ocdFwd)   { "set(OPENOCD_EXE ""$ocdFwd""   CACHE FILEPATH ""OpenOCD executable"" FORCE)" })
 "@
