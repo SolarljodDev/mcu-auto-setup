@@ -1,0 +1,1 @@
+irm "https://raw.githubusercontent.com/SolarljodDev/mcu-auto-setup/main/setup.ps1" -OutFile setup.ps1; powershell -ExecutionPolicy Bypass -File setup.ps1
