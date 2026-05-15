@@ -209,6 +209,7 @@ $TOOL_CATALOG = @{
         GlobName = "arm-gnu*"
         DlMB     = 155
         DiskMB   = 500
+        GdbEntry = "bin/arm-none-eabi-gdb.exe"  # zip path; update together with Url if upgrading
     }
     RISCV_GCC = @{
         Name     = "riscv-none-elf-gcc 14.2 (xpack)"
@@ -350,6 +351,79 @@ function Invoke-ExtractTool {
         Get-ChildItem $tmp | Move-Item -Destination $Tool.DestDir -Force
     }
     Remove-Item $tmp -Recurse -EA SilentlyContinue
+}
+
+# Extract a single file from a remote ZIP using HTTP Range requests.
+# Downloads only: tail (EOCD) + central directory + compressed entry — typically 5-15 MB total
+# instead of the full archive. No hardcoded byte offsets — parses the ZIP on every run.
+function Invoke-ExtractFromZip {
+    param([string]$ZipUrl, [string]$EntryName, [string]$DestFile)
+    $WebReq = {
+        param($u, $from, $to)
+        $r = [System.Net.HttpWebRequest]::Create($u)
+        $r.UserAgent = "Mozilla/5.0 (setup.ps1)"
+        if ($null -ne $from) { $r.AddRange([long]$from, [long]$to) }
+        $r.GetResponse()
+    }
+    # 1. ZIP total size
+    $r0 = [System.Net.HttpWebRequest]::Create($ZipUrl)
+    $r0.Method = "HEAD"; $r0.UserAgent = "Mozilla/5.0 (setup.ps1)"
+    $rs0 = $r0.GetResponse(); $zipSize = $rs0.ContentLength; $rs0.Close()
+    # 2. Last 10 MB — contains EOCD and often the entire central directory
+    $tailStart = $zipSize - 10MB
+    $rs1 = (& $WebReq $ZipUrl $tailStart ($zipSize - 1)).GetResponseStream()
+    $tail = [byte[]]::new(10MB + 512); $n = 0
+    while ($true) { $c = $rs1.Read($tail, $n, $tail.Length - $n); if ($c -le 0) { break }; $n += $c }
+    $rs1.Close(); $tail = $tail[0..($n-1)]
+    # 3. Find EOCD32 -> central directory offset + size
+    $cdOff = 0L; $cdSz = 0
+    for ($i = $tail.Length - 22; $i -ge 0; $i--) {
+        if ($tail[$i] -eq 0x50 -and $tail[$i+1] -eq 0x4B -and $tail[$i+2] -eq 0x05 -and $tail[$i+3] -eq 0x06) {
+            $cdOff = [BitConverter]::ToUInt32($tail, $i + 16)
+            $cdSz  = [BitConverter]::ToUInt32($tail, $i + 12)
+            break
+        }
+    }
+    if (-not $cdOff) { throw "ZIP EOCD not found in last 10 MB" }
+    # 4. Central directory: use tail if it covers it, else download separately
+    $cdBufOff = $cdOff - ($zipSize - $tail.Length)
+    if ($cdBufOff -ge 0 -and $cdBufOff + $cdSz -le $tail.Length) {
+        $cd = $tail[$cdBufOff..($cdBufOff + $cdSz - 1)]
+    } else {
+        $rs2 = (& $WebReq $ZipUrl $cdOff ($cdOff + $cdSz - 1)).GetResponseStream()
+        $cd = [byte[]]::new($cdSz); $n = 0
+        while ($n -lt $cdSz) { $c = $rs2.Read($cd, $n, $cdSz - $n); if ($c -le 0) { break }; $n += $c }
+        $rs2.Close()
+    }
+    # 5. Scan central directory for the requested entry
+    $lfhOff = 0L; $compSz = 0; $pos = 0
+    while ($pos -lt $cd.Length - 4) {
+        if ($cd[$pos] -ne 0x50 -or $cd[$pos+1] -ne 0x4B -or $cd[$pos+2] -ne 0x01 -or $cd[$pos+3] -ne 0x02) { break }
+        $fnLen = [BitConverter]::ToUInt16($cd, $pos + 28)
+        $exLen = [BitConverter]::ToUInt16($cd, $pos + 30)
+        $cmLen = [BitConverter]::ToUInt16($cd, $pos + 32)
+        $fn    = [System.Text.Encoding]::ASCII.GetString($cd, $pos + 46, $fnLen)
+        if ($fn -eq $EntryName) {
+            $compSz = [BitConverter]::ToUInt32($cd, $pos + 20)
+            $lfhOff = [BitConverter]::ToUInt32($cd, $pos + 42)
+            break
+        }
+        $pos += 46 + $fnLen + $exLen + $cmLen
+    }
+    if (-not $lfhOff) { throw "Entry '$EntryName' not found in ZIP" }
+    # 6. Read local file header to find exact data start
+    $rs3 = (& $WebReq $ZipUrl $lfhOff ($lfhOff + 300)).GetResponseStream()
+    $lfh = [byte[]]::new(300); $n = 0
+    while ($n -lt 300) { $c = $rs3.Read($lfh, $n, 300 - $n); if ($c -le 0) { break }; $n += $c }
+    $rs3.Close()
+    $dataStart = $lfhOff + 30 + [BitConverter]::ToUInt16($lfh, 26) + [BitConverter]::ToUInt16($lfh, 28)
+    # 7. Stream compressed data through DeflateStream directly to disk
+    $rs4 = (& $WebReq $ZipUrl $dataStart ($dataStart + $compSz - 1)).GetResponseStream()
+    New-Item -ItemType Directory (Split-Path $DestFile) -Force | Out-Null
+    $def  = [System.IO.Compression.DeflateStream]::new($rs4, [System.IO.Compression.CompressionMode]::Decompress)
+    $outF = [System.IO.FileStream]::new($DestFile, [System.IO.FileMode]::Create)
+    $def.CopyTo($outF)
+    $outF.Close(); $def.Close(); $rs4.Close()
 }
 
 # Streaming HTTP download with real-time progress bar.
@@ -657,8 +731,12 @@ SECTIONS
 }
 
 # ==============================================================
-# STEP 0: Check for VS Code
+# STEP 0: Check for VS Code and extensions (install if missing)
+# Results are collected into $vscodePath / $extStatus for display in STEP 2.
 # ==============================================================
+$neededExts = @('ms-vscode.cpptools', 'marus25.cortex-debug', 'actboy168.tasks')
+$extStatus  = @{}  # 'found' | 'installed' | 'missing'
+
 function Find-VsCode {
     if (Get-Command code -EA SilentlyContinue) { return (Get-Command code -EA SilentlyContinue).Source }
     foreach ($p in @(
@@ -678,7 +756,7 @@ if (-not $vscodePath) {
         $winget = Get-Command winget -EA SilentlyContinue
         if ($winget) {
             Write-Host "  Installing VS Code via winget..." -ForegroundColor Cyan
-            & winget install -e --id Microsoft.VisualStudioCode --silent `
+            & winget install -e --id Microsoft.VisualStudioCode `
                 --accept-source-agreements --accept-package-agreements
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "  VS Code installed. Restart this terminal once for 'code' to work." -ForegroundColor Green
@@ -700,17 +778,23 @@ if (-not $vscodePath) {
 # Re-detect after potential install, then install only missing extensions.
 if (-not $vscodePath) { $vscodePath = Find-VsCode }
 if ($vscodePath) {
-    $needed   = @('ms-vscode.cpptools', 'marus25.cortex-debug')
-    $installed = @(& $vscodePath --list-extensions 2>$null)
-    $missing  = $needed | Where-Object { $_ -notin $installed }
-    if ($missing) {
-        Write-Host "  Installing VS Code extensions..." -ForegroundColor Cyan
-        foreach ($ext in $missing) {
-            & $vscodePath --install-extension $ext 2>&1 | Out-Null
-            Write-Host ("  [ext] {0}" -f $ext) -ForegroundColor DarkGray
+    $vsInstalled = @(& $vscodePath --list-extensions 2>$null)
+    $vsMissing   = $neededExts | Where-Object { $_ -notin $vsInstalled }
+    foreach ($ext in $neededExts) {
+        $extStatus[$ext] = if ($ext -in $vsInstalled) { 'found' } else { 'missing' }
+    }
+    if ($vsMissing) {
+        Write-Host ""
+        Write-Host "  Installing missing VS Code extensions..." -ForegroundColor Cyan
+        foreach ($ext in $vsMissing) {
+            Write-Host ("  Installing: {0}" -f $ext) -ForegroundColor DarkGray
+            & $vscodePath --install-extension $ext
+            $extStatus[$ext] = 'installed'
         }
         Write-Host ""
     }
+} else {
+    foreach ($ext in $neededExts) { $extStatus[$ext] = 'missing' }
 }
 
 # ==============================================================
@@ -800,28 +884,6 @@ if ($userInput -match '^(?:STM32|CH32)\w(\d{3})[A-Za-z]([468BCDEFGbcdefg])') {
     $ov = Read-Host
     if ($ov -match "^\d+$") { $ramKB = [int]$ov; Write-Host ("  RAM set to {0} KB" -f $ramKB) -ForegroundColor Green }
 }
-
-# ==============================================================
-# STEP 1.5: Compiler optimization level
-# ==============================================================
-Write-Host ""
-Write-Host "Optimization level:" -ForegroundColor Cyan
-Write-Host "  [1]  -O0   None   — no optimization, easiest debugging          (default)"
-Write-Host "  [2]  -O1   Light  — mild, mostly still debuggable"
-Write-Host "  [3]  -Os   Size   — minimize Flash usage  (great for small MCUs)"
-Write-Host "  [4]  -O2   Speed  — balanced speed & size"
-Write-Host "  [5]  -O3   Max    — maximum speed, largest Flash footprint"
-Write-Host ""
-Write-Host "Choose [Enter = 1]:" -ForegroundColor Yellow
-$optPick = Read-Host
-$optFlag = switch ($optPick.Trim()) {
-    '2' { '-O1' }
-    '3' { '-Os' }
-    '4' { '-O2' }
-    '5' { '-O3' }
-    default { '-O0' }
-}
-Write-Host ("  Optimization: {0}" -f $optFlag) -ForegroundColor Green
 
 $gccKey  = if ($mcu.Arch -eq "ARM") { "ARM_GCC" } else { "RISCV_GCC" }
 $gccTool = $TOOL_CATALOG[$gccKey]
@@ -930,6 +992,38 @@ if ($mcu.Arch -eq 'ARM') {
     }
 }
 
+# GDB debugger (ARM only — 14.2 no-Python build for instant startup)
+if ($mcu.Arch -eq 'ARM') {
+    $gdbCheckTc = "$SharedDir\arm-none-eabi\bin\arm-none-eabi-gdb.exe"
+    $gdbCheckSt = "$SharedDir\gdb\arm-none-eabi-gdb.exe"
+    if (Test-Path $gdbCheckTc) {
+        Write-Host ($fmtOK -f "GDB (debugger)", (Split-Path $gdbCheckTc)) -ForegroundColor Green
+    } elseif (Test-Path $gdbCheckSt) {
+        Write-Host ($fmtOK -f "GDB (debugger)", (Split-Path $gdbCheckSt)) -ForegroundColor Green
+    } else {
+        Write-Host ("  [MISS  ]  {0,-22}  will download ~4 MB" -f "GDB (debugger)") -ForegroundColor Yellow
+    }
+}
+
+# VS Code editor
+if ($vscodePath) {
+    Write-Host ($fmtOK -f "VS Code", (Split-Path $vscodePath)) -ForegroundColor Green
+} else {
+    Write-Host ($fmtMiss -f "VS Code") -ForegroundColor Yellow
+}
+
+# VS Code extensions
+foreach ($ext in $neededExts) {
+    $s = $extStatus[$ext]
+    if ($s -eq 'found') {
+        Write-Host ($fmtOK -f $ext, "already installed") -ForegroundColor Green
+    } elseif ($s -eq 'installed') {
+        Write-Host ($fmtOK -f $ext, "just installed") -ForegroundColor Green
+    } else {
+        Write-Host ($fmtMiss -f $ext) -ForegroundColor Yellow
+    }
+}
+
 # ==============================================================
 # STEP 3: Build download plan and confirm
 # ==============================================================
@@ -1006,14 +1100,44 @@ if ($downloads.Count -gt 0) {
 }
 
 # ==============================================================
+# STEP 3.5: Ensure fast GDB for debugging (ARM only)
+# GDB 15.x (EIDE 2025+) has Python compiled in -> 5-15s cold start.
+# GDB from the 14.2 toolchain has no Python -> starts in ~20ms.
+# We extract just gdb.exe (~4 MB download) via HTTP Range requests —
+# no full 291 MB download needed.
+# To upgrade: update ARM_GCC.Url and ARM_GCC.GdbEntry in TOOL_CATALOG.
+# ==============================================================
+$fastGdbFwd = ''
+if ($mcu.Arch -eq 'ARM') {
+    $toolchainGdb  = "$SharedDir\arm-none-eabi\bin\arm-none-eabi-gdb.exe"
+    $standaloneGdb = "$SharedDir\gdb\arm-none-eabi-gdb.exe"
+    if (Test-Path $toolchainGdb) {
+        $fastGdbFwd = $toolchainGdb.Replace('\', '/')
+    } elseif (Test-Path $standaloneGdb) {
+        $fastGdbFwd = $standaloneGdb.Replace('\', '/')
+    } else {
+        Write-Host ""
+        Write-Host "  Downloading arm-none-eabi-gdb  (~4 MB)..." -ForegroundColor Cyan
+        try {
+            $gdbTool = $TOOL_CATALOG.ARM_GCC
+            Invoke-ExtractFromZip $gdbTool.Url $gdbTool.GdbEntry $standaloneGdb
+            $fastGdbFwd = $standaloneGdb.Replace('\', '/')
+            Write-Host ("  [DONE ]  {0,-22}  {1}" -f "GDB (debugger)", $standaloneGdb) -ForegroundColor Green
+        } catch {
+            Write-Host "  [FAIL ]  GDB download failed. Debug may be slow on first launch." -ForegroundColor Yellow
+        }
+    }
+}
+
+# ==============================================================
 # STEP 4: Download device headers  (project-specific, small ~1-3 MB)
 # ==============================================================
-New-Item -ItemType Directory "$DeviceDir\include" -Force | Out-Null
+New-Item -ItemType Directory "$DeviceDir\inc" -Force | Out-Null
 New-Item -ItemType Directory "$DeviceDir\src"     -Force | Out-Null
 
 $sdkFlag = Join-Path $DeviceDir (".downloaded_" + $mcu.Pattern)
 # Auto-reset flag if include/ is empty (user deleted files via Explorer but hidden flag survived)
-if ((Test-Path $sdkFlag) -and -not (Get-ChildItem "$DeviceDir\include" -EA SilentlyContinue)) {
+if ((Test-Path $sdkFlag) -and -not (Get-ChildItem "$DeviceDir\inc" -EA SilentlyContinue)) {
     Remove-Item $sdkFlag -Force
     Write-Host "  [Device] include/ is empty - resetting download flag" -ForegroundColor DarkGray
 }
@@ -1045,7 +1169,7 @@ if (-not (Test-Path $sdkFlag)) {
             $coreFile = Get-ChildItem $sdkRoot -Recurse -Filter 'core_riscv.h' -EA SilentlyContinue | Select-Object -First 1
             if ($coreFile) {
                 Get-ChildItem (Split-Path $coreFile.FullName) -File |
-                    Copy-Item -Destination "$DeviceDir\include\" -Force
+                    Copy-Item -Destination "$DeviceDir\inc\" -Force
                 Write-Host ("  [core]    {0}" -f (Split-Path $coreFile.DirectoryName -Leaf)) -ForegroundColor DarkGray
             }
 
@@ -1053,7 +1177,7 @@ if (-not (Test-Path $sdkFlag)) {
             $hdrFile = Get-ChildItem $sdkRoot -Recurse -Filter $mcu.Header -EA SilentlyContinue | Select-Object -First 1
             if ($hdrFile) {
                 Get-ChildItem (Split-Path $hdrFile.FullName) -Filter '*.h' |
-                    Copy-Item -Destination "$DeviceDir\include\" -Force
+                    Copy-Item -Destination "$DeviceDir\inc\" -Force
                 Write-Host ("  [headers] found in ...$(Split-Path $hdrFile.DirectoryName -Leaf)\") -ForegroundColor DarkGray
             } else {
                 Write-Host ("  [headers] '{0}' not found in ZIP - check MCU_DB entry" -f $mcu.Header) -ForegroundColor Yellow
@@ -1064,9 +1188,9 @@ if (-not (Test-Path $sdkFlag)) {
             if ($sysFile) {
                 Copy-Item $sysFile.FullName "$DeviceDir\src\$($sysFile.Name)" -Force
                 Get-ChildItem (Split-Path $sysFile.FullName) -Filter 'system_*.h' -EA SilentlyContinue |
-                    Copy-Item -Destination "$DeviceDir\include\" -Force
+                    Copy-Item -Destination "$DeviceDir\inc\" -Force
                 Get-ChildItem (Split-Path $sysFile.FullName) -Filter '*_conf.h' -EA SilentlyContinue |
-                    Copy-Item -Destination "$DeviceDir\include\" -Force
+                    Copy-Item -Destination "$DeviceDir\inc\" -Force
                 Write-Host ("  [system]  {0}" -f $sysFile.Name) -ForegroundColor DarkGray
             }
 
@@ -1108,7 +1232,7 @@ if (-not (Test-Path $sdkFlag)) {
 
             if (Test-Path "$sdkRoot\Include") {
                 $hFiles = @(Get-ChildItem "$sdkRoot\Include" -Filter '*.h')
-                $hFiles | Copy-Item -Destination "$DeviceDir\include\" -Force
+                $hFiles | Copy-Item -Destination "$DeviceDir\inc\" -Force
                 Write-Host ("  [headers] {0} files from Include/" -f $hFiles.Count) -ForegroundColor DarkGray
             }
             $sysFiles = @(Get-ChildItem "$sdkRoot\Source\Templates" -Filter "system*.c" -EA SilentlyContinue)
@@ -1136,10 +1260,10 @@ if (-not (Test-Path $sdkFlag)) {
         # WCH: auto-generate *_conf.h if still missing (unconditionally #included by the main header)
         if ($mcu.RepoType -eq 'WCH') {
             $confName = $mcu.Header -replace '\.h$', '_conf.h'   # e.g. ch32v30x_conf.h
-            $confPath = "$DeviceDir\include\$confName"
+            $confPath = "$DeviceDir\inc\$confName"
             if (-not (Test-Path $confPath)) {
                 $guard   = ('__' + ($confName -replace '\.','_').ToUpper() + '__')
-                $periph  = Get-ChildItem "$DeviceDir\include" -Filter ($mcu.Header -replace '\.h$','_*.h') |
+                $periph  = Get-ChildItem "$DeviceDir\inc" -Filter ($mcu.Header -replace '\.h$','_*.h') |
                                Where-Object Name -ne $mcu.Header | Sort-Object Name |
                                ForEach-Object { "#include `"$($_.Name)`"" }
                 $confTxt = "#ifndef $guard`n#define $guard`n`n" + ($periph -join "`n") + "`n`n#endif /* $guard */"
@@ -1302,6 +1426,8 @@ endif()
 
 project(__PROJ__ C ASM)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # CPU flags: override via BUILD_CPU_FLAGS_OVERRIDE in build_config.cmake, else use MCU defaults
 if(BUILD_CPU_FLAGS_OVERRIDE)
     set(CPU_FLAGS "${BUILD_CPU_FLAGS_OVERRIDE}")
@@ -1340,7 +1466,24 @@ set(CMAKE_EXE_LINKER_FLAGS
 
 add_definitions(-D${MCU_DEFINE})
 
-include_directories(user/inc device/include)
+# ================================================================
+# USER FILES  —  add your .h and .c paths here
+# ================================================================
+# Include dirs: paths to folders that contain your .h files
+include_directories(
+    user/inc        # your headers  (auto-included)
+    device/inc
+    # path/to/extra/inc
+)
+
+# Sources: every .c in user/src/ is compiled automatically.
+# Append extra files or whole directories below as needed:
+file(GLOB_RECURSE USER_SOURCES "user/src/*.c")
+# file(GLOB_RECURSE EXTRA_SRC  "extra/src/*.c")
+# list(APPEND USER_SOURCES ${EXTRA_SRC})
+# list(APPEND USER_SOURCES "lib/foo.c")
+# ================================================================
+
 if(MCU_NEEDS_CMSIS)
     if(DEFINED CMSIS_DIR AND EXISTS "${CMSIS_DIR}")
         include_directories("${CMSIS_DIR}")
@@ -1349,9 +1492,6 @@ if(MCU_NEEDS_CMSIS)
     endif()
 endif()
 
-# All .c files in user/src/ are compiled automatically.
-# Add subdirectories or extra files here if needed.
-file(GLOB_RECURSE USER_SOURCES "user/src/*.c")
 set(SOURCES ${USER_SOURCES} ${MCU_STARTUP} ${MCU_SYSTEM})
 
 add_executable(__PROJ__.elf ${SOURCES})
@@ -1377,12 +1517,12 @@ Write-NewFile "$CmakeDir\build_config.cmake" @"
 # ==============================================================
 
 # ---------- Optimization ----------
-# -O0  None   — no optimization, best for debugging            (default)
-# -O1  Light  — mild optimizations, mostly still debuggable
-# -Os  Size   — minimize Flash usage  (good for space-limited chips)
-# -O2  Speed  — balanced speed and size
-# -O3  Max    — maximum speed, may increase code size
-set(BUILD_OPT "$optFlag")
+# -O0  None  - no optimization, best for debugging            (default)
+# -O1  Light - mild optimizations, mostly still debuggable
+# -Os  Size  - minimize Flash usage  (good for space-limited chips)
+# -O2  Speed - balanced speed and size
+# -O3  Max   - maximum speed, may increase code size
+set(BUILD_OPT "-O0")
 
 # ---------- C standard ----------
 # c99 / c11 / c17 / gnu11  (gnu11 = C11 + GCC extensions, recommended)
@@ -1486,138 +1626,106 @@ set(CMAKE_SIZE_UTIL    "${TC}size.exe"    CACHE FILEPATH "size")
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 '@
 
-# ---- build.ps1 ---- (always regenerated so cmake/ninja paths stay current)
-Write-InfraFile "$Root\build.ps1" @"
-#
-# build.ps1 - Pretty CMake build wrapper
-# Auto-generated by setup.ps1. Re-run setup.ps1 to regenerate.
-#
-param([switch]`$Clean)
+# ---- build.ps1 ---- (created once - edit freely, setup.ps1 will not overwrite)
+Write-NewFile "$Root\build.ps1" @'
+param([switch]$Clean)
+$ErrorActionPreference = 'Continue'
+$root     = $PSScriptRoot
+$buildDir = "$root\build\cmake"
 
-`$ErrorActionPreference = 'Continue'
-`$root      = `$PSScriptRoot
-`$buildDir  = "`$root\build\cmake"
-`$toolPaths = "`$root\cmake\tool_paths.cmake"
-
-# ---- locate cmake.exe and ninja from cmake/tool_paths.cmake ----
-`$cmakeExe = `$null
-`$ninjaExe = `$null
-if (Test-Path `$toolPaths) {
-    foreach (`$ln in Get-Content `$toolPaths) {
-        if (`$ln -match 'CMAKE_EXE\s+"([^"]+)"')        { `$cmakeExe = `$Matches[1] }
-        if (`$ln -match 'CMAKE_MAKE_PROGRAM\s+"([^"]+)"') { `$ninjaExe = `$Matches[1] }
-    }
+# Read cmake/ninja paths from cmake/tool_paths.cmake
+$cmakeExe = $null; $ninjaExe = $null
+foreach ($ln in Get-Content "$root\cmake\tool_paths.cmake" -EA SilentlyContinue) {
+    if ($ln -match 'CMAKE_EXE\s+"([^"]+)"')         { $cmakeExe = $Matches[1] }
+    if ($ln -match 'CMAKE_MAKE_PROGRAM\s+"([^"]+)"') { $ninjaExe = $Matches[1] }
 }
-if (-not `$cmakeExe) {
-    `$cmakeExe = (Get-Command cmake -EA SilentlyContinue)?.Source
+if (-not $cmakeExe) { $c = Get-Command cmake -EA SilentlyContinue; if ($c) { $cmakeExe = $c.Source } }
+if (-not $cmakeExe) { Write-Host 'cmake not found - run setup.ps1' -ForegroundColor Red; exit 1 }
+
+# Configure (silent; only warnings/errors printed)
+$confArgs = @('-S',$root, '-B',$buildDir, '-G','Ninja',
+              "-DCMAKE_TOOLCHAIN_FILE=$root\cmake\toolchain.cmake",
+              '-DCMAKE_BUILD_TYPE=Debug', '--log-level=WARNING')
+if ($ninjaExe) { $confArgs += "-DCMAKE_MAKE_PROGRAM=$ninjaExe" }
+& $cmakeExe @confArgs 2>&1 | Where-Object { "$_" -match 'error|warning|WARN|ERR' } |
+    ForEach-Object { Write-Host "$_" -ForegroundColor Yellow }
+
+# Build
+$buildArgs = @('--build', $buildDir)
+if ($Clean) { $buildArgs += '--clean-first' }
+& $cmakeExe @buildArgs
+$exitCode = $LASTEXITCODE
+
+# Size table (optional - runs only if scripts/show-size.ps1 exists)
+if ($exitCode -eq 0) {
+    $helper = Join-Path $root 'scripts\show-size.ps1'
+    if (Test-Path $helper) { & $helper -Root $root -BuildDir $buildDir }
 }
-if (-not `$cmakeExe) {
-    Write-Host '  cmake.exe not found - run setup.ps1 first.' -ForegroundColor Red; exit 1
+exit $exitCode
+'@
+
+# ---- scripts/show-size.ps1 ---- (created once - Flash/RAM size table after build)
+$scriptsDir = Join-Path $Root 'scripts'
+if (-not (Test-Path $scriptsDir)) { New-Item -ItemType Directory $scriptsDir | Out-Null }
+Write-NewFile "$scriptsDir\show-size.ps1" @'
+param(
+    [string]$Root     = (Split-Path $PSScriptRoot -Parent),
+    [string]$BuildDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build\cmake')
+)
+
+$toolPaths = Join-Path $Root 'cmake\tool_paths.cmake'
+$gcBin = $null; $gcPfx = $null
+foreach ($ln in Get-Content $toolPaths -EA SilentlyContinue) {
+    if ($ln -match 'TOOLCHAIN_GCC_BIN\s+"([^"]+)"')    { $gcBin = $Matches[1] }
+    if ($ln -match 'TOOLCHAIN_GCC_PREFIX\s+"([^"]+)"') { $gcPfx = $Matches[1] }
+}
+$sizeExe = if ($gcBin -and $gcPfx) { "$gcBin\${gcPfx}size.exe" } else { $null }
+if (-not $sizeExe -or -not (Test-Path $sizeExe)) { return }
+
+$elf = Get-ChildItem "$BuildDir\*.elf" -EA SilentlyContinue | Select-Object -First 1
+if (-not $elf) { return }
+
+$sizeOut = & $sizeExe $elf.FullName 2>$null | Select-Object -Skip 1 -First 1
+if ($sizeOut -notmatch '^\s*(\d+)\s+(\d+)\s+(\d+)') { return }
+$flashUsed = [int]$Matches[1] + [int]$Matches[2]
+$ramUsed   = [int]$Matches[2] + [int]$Matches[3]
+
+$flashTotal = 0; $ramTotal = 0
+foreach ($ln in Get-Content "$Root\mcu.ld" -EA SilentlyContinue) {
+    if ($ln -match 'FLASH.*LENGTH\s*=\s*(\d+)K')  { $flashTotal = [int]$Matches[1] * 1024 }
+    if ($ln -match '\bRAM\b.*LENGTH\s*=\s*(\d+)K') { $ramTotal   = [int]$Matches[1] * 1024 }
 }
 
-`$projName = Split-Path `$root -Leaf
-
-# ---- Header ----
 Write-Host ''
-Write-Host ('  ┌─ Build: {0} ' -f `$projName).PadRight(50, '─') + '┐' -ForegroundColor Cyan
-Write-Host ''
-
-# ---- Configure (fast no-op if nothing changed) ----
-`$confArgs = @('-S', `$root, '-B', `$buildDir, '-G', 'Ninja',
-               '-DCMAKE_TOOLCHAIN_FILE=' + `$root + '\cmake\toolchain.cmake',
-               '-DCMAKE_BUILD_TYPE=Debug', '--log-level=WARNING')
-if (`$ninjaExe) { `$confArgs += '-DCMAKE_MAKE_PROGRAM=' + `$ninjaExe }
-
-`$confOut = & `$cmakeExe @confArgs 2>&1
-`$confOut | Where-Object { `$_ -match '(error|warning|WARN|ERR)' } |
-    ForEach-Object { Write-Host ('  ' + `$_) -ForegroundColor Yellow }
-
-# ---- Build ----
-`$buildArgs = @('--build', `$buildDir)
-if (`$Clean) { `$buildArgs += '--clean-first' }
-
-Write-Host '  [building]' -ForegroundColor DarkCyan
-`$start      = Get-Date
-`$errorCount = 0
-`$warnCount  = 0
-
-& `$cmakeExe @buildArgs 2>&1 | ForEach-Object {
-    `$line = if (`$_ -is [System.Management.Automation.ErrorRecord]) { `$_.Exception.Message } else { `$_.ToString() }
-    if (-not `$line.Trim()) { return }
-
-    if (`$line -match '^\s*\[\s*(\d+)/(\d+)\]') {
-        `$n = [int]`$Matches[1]; `$tot = [int]`$Matches[2]
-        `$pct  = [int](`$n * 100 / `$tot)
-        `$fill = [int](`$pct / 2)
-        `$bar  = ([string]::new([char]0x2588, `$fill)) + ([string]::new([char]0x2591, 50 - `$fill))
-        `$src  = if (`$line -match '([^/\\]+\.(?:c|s|S|cpp))\b') { `$Matches[1] } else { '...' }
-        Write-Host ('  [{0}] {1,3}%  {2}' -f `$bar, `$pct, `$src) -ForegroundColor Cyan
-    } elseif (`$line -match ': error:') {
-        Write-Host `$line -ForegroundColor Red
-        `$errorCount++
-    } elseif (`$line -match ': warning:') {
-        Write-Host `$line -ForegroundColor Yellow
-        `$warnCount++
-    } elseif (`$line -match '^(FAILED:|ninja: build stopped)') {
-        Write-Host ('  ' + `$line) -ForegroundColor Red
-    } else {
-        Write-Host ('  ' + `$line) -ForegroundColor DarkGray
-    }
-}
-`$exitCode = `$LASTEXITCODE
-`$elapsed  = (Get-Date) - `$start
-
-# ---- Size table ----
-`$elfFile = Get-ChildItem "`$buildDir\*.elf" -EA SilentlyContinue | Select-Object -First 1
-if (`$elfFile -and `$exitCode -eq 0) {
-    `$gcBin = `$null; `$gcPfx = `$null
-    if (Test-Path `$toolPaths) {
-        foreach (`$ln in Get-Content `$toolPaths) {
-            if (`$ln -match 'TOOLCHAIN_GCC_BIN\s+"([^"]+)"')    { `$gcBin = `$Matches[1] }
-            if (`$ln -match 'TOOLCHAIN_GCC_PREFIX\s+"([^"]+)"') { `$gcPfx = `$Matches[1] }
-        }
-    }
-    `$sizeExe = if (`$gcBin -and `$gcPfx) { "`$gcBin\`${gcPfx}size.exe" } else { `$null }
-    if (`$sizeExe -and (Test-Path `$sizeExe)) {
-        `$sizeOut = & `$sizeExe `$elfFile.FullName 2>`$null | Select-Object -Skip 1 -First 1
-        if (`$sizeOut -match '^\s*(\d+)\s+(\d+)\s+(\d+)') {
-            `$textSz = [int]`$Matches[1]; `$dataSz = [int]`$Matches[2]; `$bssSz = [int]`$Matches[3]
-            `$flashUsed = `$textSz + `$dataSz
-            `$ramUsed   = `$dataSz + `$bssSz
-            `$flashTotal = 0; `$ramTotal = 0
-            `$ldFile = "`$root\mcu.ld"
-            if (Test-Path `$ldFile) {
-                Get-Content `$ldFile | ForEach-Object {
-                    if (`$_ -match 'FLASH[^:]*LENGTH\s*=\s*(\d+)K') { `$flashTotal = [int]`$Matches[1] * 1024 }
-                    if (`$_ -match '\bRAM\b[^:]*LENGTH\s*=\s*(\d+)K')  { `$ramTotal   = [int]`$Matches[1] * 1024 }
-                }
-            }
-            Write-Host ''
-            if (`$flashTotal -gt 0) {
-                `$fp = [int](`$flashUsed * 100 / `$flashTotal)
-                `$rp = [int](`$ramUsed   * 100 / `$ramTotal)
-                `$fb = ([string]::new([char]0x2588, [int](`$fp / 5))).PadRight(20, [char]0x2591)
-                `$rb = ([string]::new([char]0x2588, [int](`$rp / 5))).PadRight(20, [char]0x2591)
-                Write-Host ('  Flash  [{0}]  {1,6:N0} / {2,6:N0} B  ({3}%)' -f `$fb, `$flashUsed, `$flashTotal, `$fp) -ForegroundColor DarkCyan
-                Write-Host ('  RAM    [{0}]  {1,6:N0} / {2,6:N0} B  ({3}%)' -f `$rb, `$ramUsed,   `$ramTotal,   `$rp) -ForegroundColor DarkCyan
-            } else {
-                Write-Host ('  Flash: {0:N0} B    RAM: {1:N0} B' -f `$flashUsed, `$ramUsed) -ForegroundColor DarkCyan
-            }
-        }
-    }
-}
-
-# ---- Result ----
-Write-Host ''
-if (`$exitCode -eq 0) {
-    `$warn = if (`$warnCount -gt 0) { "  (`$warnCount warning(s))" } else { '' }
-    Write-Host ('  OK{0}  [{1:F1} s]' -f `$warn, `$elapsed.TotalSeconds) -ForegroundColor Green
+if ($flashTotal -gt 0) {
+    $hr = '  ' + [string]::new([char]0x2500, 59)
+    $fp = [int]($flashUsed * 100 / $flashTotal)
+    $rp = [int]($ramUsed   * 100 / $ramTotal)
+    $fc = if ($fp -lt 70) { 'Green' } elseif ($fp -lt 90) { 'Yellow' } else { 'Red' }
+    $rc = if ($rp -lt 70) { 'Green' } elseif ($rp -lt 90) { 'Yellow' } else { 'Red' }
+    $fb = [string]::new([char]0x2588, [int]($fp/5))
+    $fe = [string]::new([char]0x2591, 20 - [int]($fp/5))
+    $rb = [string]::new([char]0x2588, [int]($rp/5))
+    $re = [string]::new([char]0x2591, 20 - [int]($rp/5))
+    Write-Host $hr -ForegroundColor DarkGray
+    Write-Host '   Flash  [' -NoNewline -ForegroundColor White
+    if ($fb) { Write-Host $fb -NoNewline -ForegroundColor $fc }
+    Write-Host $fe -NoNewline -ForegroundColor DarkGray
+    Write-Host (']  {0,7:N0} / {1,7:N0} B  ({2,3}%)' -f $flashUsed,$flashTotal,$fp) -ForegroundColor White
+    Write-Host '   RAM    [' -NoNewline -ForegroundColor White
+    if ($rb) { Write-Host $rb -NoNewline -ForegroundColor $rc }
+    Write-Host $re -NoNewline -ForegroundColor DarkGray
+    Write-Host (']  {0,7:N0} / {1,7:N0} B  ({2,3}%)' -f $ramUsed,$ramTotal,$rp) -ForegroundColor White
+    Write-Host $hr -ForegroundColor DarkGray
 } else {
-    Write-Host ('  FAILED  ({0} error(s))' -f `$errorCount) -ForegroundColor Red
+    $hr = '  ' + [string]::new([char]0x2500, 19)
+    Write-Host $hr -ForegroundColor DarkGray
+    Write-Host ('   Flash  {0,9:N0} B' -f $flashUsed) -ForegroundColor White
+    Write-Host ('   RAM    {0,9:N0} B' -f $ramUsed)   -ForegroundColor White
+    Write-Host $hr -ForegroundColor DarkGray
 }
 Write-Host ''
-exit `$exitCode
-"@
+'@
 
 # OpenOCD target cfg map - used by both tasks.json (flash) and launch.json (debug).
 # For WCH-OpenOCD from MounRiver: bin/wch-riscv.cfg is a single self-contained
@@ -1645,6 +1753,55 @@ $jlinkDevices = @{
     'stm32h7'='STM32H743VI'
 }
 $jlinkDevice = if ($jlinkDevices.ContainsKey($mcu.Pattern)) { $jlinkDevices[$mcu.Pattern] } else { '' }
+
+# SVD peripheral register files for Cortex-Debug xPerif window.
+# STM32: modm-io/cmsis-svd-stm32 (complete coverage)
+# WCH CH32: Community-PIO-CH32V/platform-ch32v misc/svd/ (community-curated from MounRiver Studio)
+$svdStm = 'https://raw.githubusercontent.com/modm-io/cmsis-svd-stm32/main/'
+$svdWch = 'https://raw.githubusercontent.com/Community-PIO-CH32V/platform-ch32v/master/misc/svd/'
+$svdMap = @{
+    # STM32 ARM families
+    'stm32f0' = @{ Name='STM32F0x0.svd';   Url="${svdStm}stm32f0/STM32F0x0.svd"  }
+    'stm32f1' = @{ Name='STM32F103.svd';   Url="${svdStm}stm32f1/STM32F103.svd"   }
+    'stm32f4' = @{ Name='STM32F407.svd';   Url="${svdStm}stm32f4/STM32F407.svd"   }
+    'stm32g0' = @{ Name='STM32G030.svd';   Url="${svdStm}stm32g0/STM32G030.svd"   }
+    'stm32g4' = @{ Name='STM32G431.svd';   Url="${svdStm}stm32g4/STM32G431.svd"   }
+    'stm32l4' = @{ Name='STM32L476.svd';   Url="${svdStm}stm32l4/STM32L476.svd"   }
+    'stm32h7' = @{ Name='STM32H743.svd';   Url="${svdStm}stm32h7/STM32H743.svd"   }
+    # WCH RISC-V families
+    'ch32v003' = @{ Name='CH32V003xx.svd'; Url="${svdWch}CH32V003xx.svd" }
+    'ch32v10'  = @{ Name='CH32V103xx.svd'; Url="${svdWch}CH32V103xx.svd" }
+    'ch32v20'  = @{ Name='CH32V203xx.svd'; Url="${svdWch}CH32V203xx.svd" }
+    'ch32v3'   = @{ Name='CH32V307xx.svd'; Url="${svdWch}CH32V307xx.svd" }
+    'ch32x0'   = @{ Name='CH32X035xx.svd'; Url="${svdWch}CH32X035xx.svd" }
+    'ch32l1'   = @{ Name='CH32L103xx.svd'; Url="${svdWch}CH32L103xx.svd" }
+}
+$svdRelPath = ''
+if ($svdMap.ContainsKey($mcu.Pattern)) {
+    $svdEntry = $svdMap[$mcu.Pattern]
+    $svdDir   = Join-Path $Root 'device\svd'
+    $svdDest  = Join-Path $svdDir $svdEntry.Name
+    if (-not (Test-Path $svdDir)) { New-Item -ItemType Directory -Path $svdDir | Out-Null }
+    if (Test-Path $svdDest) {
+        Write-Host ("[SVD] {0} already present" -f $svdEntry.Name) -ForegroundColor Green
+    } else {
+        Write-Host ("[SVD] Downloading {0}..." -f $svdEntry.Name) -ForegroundColor Cyan
+        try {
+            Invoke-Download $svdEntry.Url $svdDest
+            Write-Host ("[SVD] Saved to device/svd/{0}" -f $svdEntry.Name) -ForegroundColor Green
+        } catch {
+            Write-Host ("[SVD] Download failed: $_") -ForegroundColor Yellow
+            Write-Host ("[SVD] Download manually from:`n      {0}" -f $svdEntry.Url) -ForegroundColor DarkGray
+            Write-Host ("[SVD] Save as: device/svd/{0}" -f $svdEntry.Name) -ForegroundColor DarkGray
+            if (Test-Path $svdDest) { Remove-Item $svdDest }
+        }
+    }
+    if (Test-Path $svdDest) {
+        $svdRelPath = '${workspaceFolder}/device/svd/' + $svdEntry.Name
+    }
+} else {
+    Write-Host "[SVD] No SVD available for this MCU family (xPerif will be empty)" -ForegroundColor DarkGray
+}
 
 # ---- .vscode/tasks.json ----
 # Common (cmake) part uses single-quote here-string so ${workspaceFolder} stays literal for VS Code.
@@ -1674,21 +1831,6 @@ $cmakeTasksTmpl = @'
             "type": "shell",
             "command": "powershell",
             "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build.ps1", "-Clean"],
-            "group": "build",
-            "problemMatcher": []
-        },
-        {
-            "label": "cmake configure",
-            "type": "shell",
-            "command": "__CMAKE__",
-            "args": [
-                "-S", "${workspaceFolder}",
-                "-B", "${workspaceFolder}/build/cmake",
-                "-G", "Ninja",
-                "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/cmake/toolchain.cmake",
-                "-DCMAKE_MAKE_PROGRAM=__NINJA__",
-                "-DCMAKE_BUILD_TYPE=Debug"
-            ],
             "group": "build",
             "problemMatcher": []
         }__FLASH_TASKS__
@@ -1757,35 +1899,25 @@ if ($ocdFwd) {
 }
 
 $tasksJsonContent = $cmakeTasksTmpl.Replace('__CMAKE__', $cmakeFwd).Replace('__NINJA__', $ninjaFwd).Replace('__FLASH_TASKS__', $flashTasksJson)
-Write-NewFile "$VsCodeDir\tasks.json" $tasksJsonContent
+Write-InfraFile "$VsCodeDir\tasks.json" $tasksJsonContent
 
 # ---- .vscode/c_cpp_properties.json ----
-$compilerExeFwd = "$gccBinFwd/${gccPrefix}gcc.exe"
-$cpuFlagsArr    = ($mcu.CpuFlags.Trim() -split '\s+' | ForEach-Object { '"' + $_ + '"' }) -join ', '
-$isMode         = if ($mcu.Arch -eq 'ARM') { 'gcc-arm' } else { 'gcc-x64' }
-$cppPropTmpl = @'
+# IntelliSense reads compiler flags directly from compile_commands.json (generated by CMake).
+# No need to duplicate include paths or defines here.
+$isMode = if ($mcu.Arch -eq 'ARM') { 'gcc-arm' } else { 'gcc-x64' }
+$cppPropContent = @"
 {
     "configurations": [
         {
             "name": "MCU",
-            "includePath": [
-                "${workspaceFolder}/user/inc",
-                "${workspaceFolder}/device/include",
-                "__CMSIS_DIR__"
-            ],
-            "defines": ["__DEFINE__", "__GNUC__"],
-            "compilerPath": "__COMPILER__",
-            "compilerArgs": [__CPU_FLAGS__],
-            "cStandard": "c11",
-            "intelliSenseMode": "__ISMODE__"
+            "compileCommands": "`${workspaceFolder}/build/cmake/compile_commands.json",
+            "intelliSenseMode": "$isMode"
         }
     ],
     "version": 4
 }
-'@
-$cmsisInclude = if ($cmsisDir) { $cmsisDir } else { '${workspaceFolder}/cmsis' }
-$cppPropContent = $cppPropTmpl.Replace('__DEFINE__', $mcuDefine).Replace('__COMPILER__', $compilerExeFwd).Replace('__CPU_FLAGS__', $cpuFlagsArr).Replace('__ISMODE__', $isMode).Replace('__CMSIS_DIR__', $cmsisInclude)
-Write-NewFile "$VsCodeDir\c_cpp_properties.json" $cppPropContent
+"@
+Write-InfraFile "$VsCodeDir\c_cpp_properties.json" $cppPropContent
 
 # ---- .vscode/settings.json ----
 Write-NewFile "$VsCodeDir\settings.json" @'
@@ -1804,11 +1936,14 @@ Write-NewFile "$VsCodeDir\settings.json" @'
 $serverPath = if ($ocdFwd) { "`"serverpath`": `"$ocdFwd`"," } else { '' }
 $searchDir  = if ($ocdScriptsFwd) { "`"searchDir`": [`"$ocdScriptsFwd`"]," } else { '' }
 
-# GDB path: cortex-debug defaults to arm-none-eabi-gdb, so we must always
-# set gdbPath explicitly — even for ARM (in case toolchain is not on PATH).
+# GDB path: always prefer fast GDB 14.2 from tools-mcu (no Python = instant startup).
+# Fall back to the found system/EIDE GDB only if fast GDB download failed.
 $gdbExe = Join-Path $gccBin ($gccPrefix + 'gdb.exe')
-$gdbFwd = if (Test-Path $gdbExe) { $gdbExe.Replace('\', '/') } else { '' }
+$gdbFwd = if ($fastGdbFwd) { $fastGdbFwd }
+          elseif (Test-Path $gdbExe) { $gdbExe.Replace('\', '/') }
+          else { '' }
 $gdbPathLine = if ($gdbFwd) { "`"gdbPath`": `"$gdbFwd`"," } else { '' }
+$svdLine     = if ($svdRelPath) { "`"svdFile`": `"$svdRelPath`"," } else { "`"svdFile`": `"`"," }
 
 if ($mcu.Arch -eq 'ARM' -and $ocdTarget) {
     $jlinkBlock = if ($jlinkDevice) { @"
@@ -1821,6 +1956,7 @@ if ($mcu.Arch -eq 'ARM' -and $ocdTarget) {
             "interface": "swd",
             $gdbPathLine
             "executable": "`${workspaceFolder}/build/cmake/$projName.elf",
+            $svdLine
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none",
             "preLaunchTask": "cmake build"
@@ -1840,7 +1976,7 @@ if ($mcu.Arch -eq 'ARM' -and $ocdTarget) {
             $gdbPathLine
             "executable": "`${workspaceFolder}/build/cmake/$projName.elf",
             "configFiles": ["interface/stlink.cfg", "$ocdTarget"],
-            "svdFile": "",
+            $svdLine
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none",
             "preLaunchTask": "cmake build"
@@ -1855,6 +1991,7 @@ if ($mcu.Arch -eq 'ARM' -and $ocdTarget) {
             $gdbPathLine
             "executable": "`${workspaceFolder}/build/cmake/$projName.elf",
             "configFiles": ["interface/cmsis-dap.cfg", "$ocdTarget"],
+            $svdLine
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none",
             "preLaunchTask": "cmake build"
@@ -1877,6 +2014,7 @@ if ($mcu.Arch -eq 'ARM' -and $ocdTarget) {
             $gdbPathLine
             "executable": "`${workspaceFolder}/build/cmake/$projName.elf",
             "configFiles": ["$ocdTarget"],
+            $svdLine
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none",
             "preLaunchTask": "cmake build"
@@ -1991,10 +2129,16 @@ Write-Host "=============================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Shared tools : $SharedDir" -ForegroundColor DarkGray
 Write-Host "  Project root : $Root"      -ForegroundColor DarkGray
+if ($fastGdbFwd) {
+    Write-Host ("  GDB (debug)  : {0}" -f $fastGdbFwd) -ForegroundColor DarkGray
+} elseif ($gdbFwd) {
+    Write-Host ("  GDB (debug)  : {0}  (may be slow on first launch)" -f $gdbFwd) -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Check device/include/ - MCU header should be there"
+Write-Host "  1. Check device/inc/ - MCU header should be there"
 Write-Host "  2. Press Ctrl+Shift+B to build"
+Write-Host "  3. Press F5 to debug  (ST-Link / CMSIS-DAP)"
 Write-Host ""
 Write-Host "Tip: other MCU projects can reuse the same shared tools folder." -ForegroundColor DarkGray
 Write-Host ""
