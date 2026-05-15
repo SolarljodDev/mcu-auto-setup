@@ -1540,24 +1540,14 @@ set(BUILD_WARNINGS "-Wall")
 set(BUILD_DEBUG "-g")
 
 # ---------- Float ABI override ----------
-# Leave empty "" to use the MCU default from mcu_config.cmake.
-# Change when linking mixed libraries (e.g. library compiled with soft, MCU default is hard).
 # ARM options: "soft" | "softfp" | "hard"
-# RISC-V: not used here — float handled by -march (see CPU flags override below).
-set(BUILD_FLOAT_ABI_OVERRIDE "")
+# RISC-V: not used — float ABI is encoded in -march/-mabi (see CPU flags below).
+set(BUILD_FLOAT_ABI_OVERRIDE "$($mcu.FloatABI)")
 
 # ---------- CPU / ISA flags override ----------
-# Leave empty "" to use the MCU defaults from mcu_config.cmake.
-# Override to enable/disable ISA extensions or change ABI.
-# Both -march and -mabi must be set together as one string.
-# ARM examples:
-#   Cortex-M4 default:  -mcpu=cortex-m4 -mthumb  (set by MCU)
-#   Thumb2 only:        -mcpu=cortex-m4 -mthumb -march=armv7e-m
-# WCH RISC-V examples:
-#   CH32V20x (no FPU, default):  -march=rv32imac  -mabi=ilp32
-#   CH32V20x with FPU:           -march=rv32imafc -mabi=ilp32f
-#   CH32V30x/307 with FPU:       -march=rv32imafc -mabi=ilp32f
-set(BUILD_CPU_FLAGS_OVERRIDE "")
+# Leave empty "" to fall back to mcu_config.cmake defaults.
+# -march and -mabi must always go together for RISC-V.
+set(BUILD_CPU_FLAGS_OVERRIDE "$($mcu.CpuFlags)$(if ($mcu.FpuFlags) { " " + $mcu.FpuFlags } else { "" })")
 
 # ---------- Extra preprocessor defines ----------
 # Space-separated, each prefixed with -D
