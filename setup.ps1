@@ -92,11 +92,14 @@ $MCU_DB = @(
     @{ Family="STM32F1xx  (Cortex-M3)";    Pattern="stm32f1"; Arch="ARM"
        CpuFlags="-mcpu=cortex-m3 -mthumb";    FloatABI="soft"; FpuFlags=""
        Define="STM32F103xB"; Header="stm32f1xx.h"
-       # Flash code → correct CMSIS define + startup file + RAM size for STM32F103:
-       #   LD: 4=16K/6K  6=32K/10K   MD: 8=64K/20K  B=128K/20K
-       #   HD: C=256K/48K  D=384K/48K  E=512K/64K   XL: F=768K/96K  G=1024K/96K
-       DefineByFlashCode  = @{ '4'='STM32F103x4'; '6'='STM32F103x6'; '8'='STM32F103x8'; 'B'='STM32F103xB'; 'C'='STM32F103xC'; 'D'='STM32F103xD'; 'E'='STM32F103xE'; 'F'='STM32F103xF'; 'G'='STM32F103xG' }
-       StartupByFlashCode = @{ '4'='startup_stm32f103x4.s'; '6'='startup_stm32f103x6.s'; '8'='startup_stm32f103x8.s'; 'B'='startup_stm32f103xb.s'; 'C'='startup_stm32f103xc.s'; 'D'='startup_stm32f103xd.s'; 'E'='startup_stm32f103xe.s'; 'F'='startup_stm32f103xf.s'; 'G'='startup_stm32f103xg.s' }
+       # Flash code -> correct CMSIS define + startup file + RAM size for STM32F103:
+       #   LD: 4=16K/6K  6=32K/10K   (STM32F103x6 covers both)
+       #   MD: 8=64K/20K  B=128K/20K (STM32F103xB covers both)
+       #   HD: C=256K/48K  D=384K/48K  E=512K/64K (STM32F103xE covers all three)
+       #   XL: F=768K/96K  G=1024K/96K (STM32F103xG covers both)
+       # ST ships ONE CMSIS header + startup per density tier, not per flash code.
+       DefineByFlashCode  = @{ '4'='STM32F103x6'; '6'='STM32F103x6'; '8'='STM32F103xB'; 'B'='STM32F103xB'; 'C'='STM32F103xE'; 'D'='STM32F103xE'; 'E'='STM32F103xE'; 'F'='STM32F103xG'; 'G'='STM32F103xG' }
+       StartupByFlashCode = @{ '4'='startup_stm32f103x6.s'; '6'='startup_stm32f103x6.s'; '8'='startup_stm32f103xb.s'; 'B'='startup_stm32f103xb.s'; 'C'='startup_stm32f103xe.s'; 'D'='startup_stm32f103xe.s'; 'E'='startup_stm32f103xe.s'; 'F'='startup_stm32f103xg.s'; 'G'='startup_stm32f103xg.s' }
        RamByFlashCode     = @{ '4'=6; '6'=10; '8'=20; 'B'=20; 'C'=48; 'D'=48; 'E'=64; 'F'=96; 'G'=96 }
        Repo="STMicroelectronics/cmsis_device_f1"; RepoType="STM"
        StartupGlob="startup_stm32f103xb.s"; SystemFile="system_stm32f1xx.c"
@@ -189,9 +192,9 @@ $MCU_DB = @(
 
     @{ Family="CH32L103   (QingKe V4C, RV32IMAC)";     Pattern="ch32l1"; Arch="RISCV"
        CpuFlags="-march=rv32imac -mabi=ilp32";          FloatABI=""; FpuFlags=""
-       Define="CH32L10X"; Header="ch32l10x.h"
+       Define="CH32L103"; Header="ch32l103.h"
        Repo="openwch/ch32l103"; RepoType="WCH"
-       StartupGlob="startup_ch32l10*.S"; SystemFile="system_ch32l10x.c"
+       StartupGlob="startup_ch32l10*.S"; SystemFile="system_ch32l103.c"
        NeedsCmsis=$false
        FlashKB=128;  RamKB=20;  FlashBase="0x00000000"; RamBase="0x20000000" }
 )
@@ -738,11 +741,23 @@ $neededExts = @('ms-vscode.cpptools', 'marus25.cortex-debug', 'actboy168.tasks')
 $extStatus  = @{}  # 'found' | 'installed' | 'missing'
 
 function Find-VsCode {
-    if (Get-Command code -EA SilentlyContinue) { return (Get-Command code -EA SilentlyContinue).Source }
+    # Must return path to bin\code.cmd - the CLI wrapper that understands
+    # --install-extension. Code.exe is the GUI binary; on Windows it sits in
+    # the install root and Get-Command picks it first via PATHEXT, but it
+    # rejects every CLI flag with "bad option". So we always look for the
+    # adjacent bin\code.cmd explicitly.
+    $c = Get-Command code -EA SilentlyContinue
+    if ($c -and $c.Source -match '\.(cmd|bat)$') { return $c.Source }
+    # Try to derive bin\code.cmd from whatever Get-Command found (Code.exe),
+    # then fall back to the standard install locations.
+    if ($c) {
+        $cand = Join-Path (Split-Path $c.Source) 'bin\code.cmd'
+        if (Test-Path $cand) { return $cand }
+    }
     foreach ($p in @(
-        "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
-        "$env:ProgramFiles\Microsoft VS Code\Code.exe"
-        "${env:ProgramFiles(x86)}\Microsoft VS Code\Code.exe"
+        "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+        "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd"
+        "${env:ProgramFiles(x86)}\Microsoft VS Code\bin\code.cmd"
     )) { if (Test-Path $p) { return $p } }
     return $null
 }
@@ -1278,12 +1293,36 @@ if (-not (Test-Path $sdkFlag)) {
         # (ch32vXXx_conf.h unconditionally includes it, but it's project-specific)
         if ($mcu.RepoType -eq 'WCH') {
             $itHeader = $mcu.Header -replace '\.h$', '_it.h'   # e.g. ch32v30x_it.h
-            $itPath   = Join-Path $Root "user\inc\$itHeader"
+            $itDir    = Join-Path $Root "user\inc"
+            $itPath   = Join-Path $itDir $itHeader
+            if (-not (Test-Path $itDir)) { New-Item -ItemType Directory -Path $itDir -Force | Out-Null }
             if (-not (Test-Path $itPath)) {
                 $guard  = ($itHeader -replace '\.', '_').ToUpper()   # CH32V30X_IT_H
                 $itTxt  = "#ifndef __$guard`n#define __$guard`n`n/* Add interrupt handler prototypes here as needed */`n`n#endif /* __$guard */"
                 [System.IO.File]::WriteAllText($itPath, $itTxt, (New-Object System.Text.UTF8Encoding $false))
                 Write-Host ("  [user/inc] Created stub {0}" -f $itHeader) -ForegroundColor DarkGray
+            }
+
+            # CH32L103 quirk: WCH's system_ch32l103.c::SetSysClock() unconditionally
+            # calls GPIO_IPD_Unused() which the user is expected to implement to put
+            # unused pins into pull-down for low-power. Without it the link fails on
+            # a bare project. Provide a weak no-op so the build succeeds; override in
+            # user code if you actually want low-power GPIO setup.
+            if ($mcu.Pattern -eq 'ch32l1') {
+                $stubPath = Join-Path $Root "device\src\_weak_stubs.c"
+                if (-not (Test-Path $stubPath)) {
+                    $stubTxt = @'
+/* Auto-generated by setup.ps1 - weak fallbacks for symbols that WCH's
+ * vendor system_*.c references but does not define. Override any of these
+ * in user code (drop the __attribute__((weak)) when you do).
+ */
+
+/* CH32L103: called from SetSysClock() to put unused GPIOs into pull-down. */
+__attribute__((weak)) void GPIO_IPD_Unused(void) { }
+'@
+                    [System.IO.File]::WriteAllText($stubPath, $stubTxt, (New-Object System.Text.UTF8Encoding $false))
+                    Write-Host "  [device/src] Created _weak_stubs.c (CH32L103 GPIO_IPD_Unused stub)" -ForegroundColor DarkGray
+                }
             }
         }
     } else {
@@ -1301,37 +1340,37 @@ if (-not (Test-Path $sdkFlag)) {
 # ==============================================================
 if ($mcu.Arch -eq "ARM" -and $mcu.NeedsCmsis) {
     $cmsisDest = "$SharedDir\cmsis"
-    $cmsisFlag = "$SharedDir\.downloaded_cmsis"
-    if (-not (Test-Path $cmsisFlag)) {
+    $cmsisTag  = "5.9.0"
+    $baseUrl   = "https://raw.githubusercontent.com/ARM-software/CMSIS_5/$cmsisTag/CMSIS/Core/Include"
+    # cachel1_armv7.h is transitively included by core_cm7.h - omitting it breaks
+    # every Cortex-M7 build (STM32H7/F7). Likewise core_cm4.h pulls mpu_armv7.h
+    # only at runtime, but cm7.h always needs cachel1_armv7.h.
+    $cmsisFiles = @(
+        'cmsis_compiler.h', 'cmsis_gcc.h', 'cmsis_armcc.h', 'cmsis_armclang.h',
+        'cmsis_armclang_ltm.h', 'cmsis_iccarm.h', 'cmsis_version.h',
+        'cachel1_armv7.h',
+        'core_cm0.h', 'core_cm0plus.h', 'core_cm1.h', 'core_cm3.h',
+        'core_cm4.h', 'core_cm7.h', 'core_cm23.h', 'core_cm33.h',
+        'core_cm35p.h', 'core_armv8mbl.h', 'core_armv8mml.h', 'core_armv81mml.h',
+        'core_sc000.h', 'core_sc300.h',
+        'mpu_armv7.h', 'mpu_armv8.h', 'pmu_armv8.h', 'tz_context.h'
+    )
+    New-Item -ItemType Directory $cmsisDest -Force | Out-Null
+    # Per-file check: download whatever's missing. Beats a single flag file
+    # which would silently keep an incomplete folder around when the file list
+    # is extended (as happened with cachel1_armv7.h for Cortex-M7).
+    $missing = $cmsisFiles | Where-Object { -not (Test-Path "$cmsisDest\$_") }
+    if ($missing.Count -gt 0) {
         Write-Host ""
-        Write-Host "[CMSIS] Downloading CMSIS Core headers (~500 KB, headers only)..." -ForegroundColor Cyan
-        # Download individual .h files directly - much faster than the full 29 MB archive
-        $cmsisTag   = "5.9.0"
-        $baseUrl    = "https://raw.githubusercontent.com/ARM-software/CMSIS_5/$cmsisTag/CMSIS/Core/Include"
-        $cmsisFiles = @(
-            'cmsis_compiler.h', 'cmsis_gcc.h', 'cmsis_armcc.h', 'cmsis_armclang.h',
-            'cmsis_iccarm.h', 'cmsis_version.h',
-            'core_cm0.h', 'core_cm0plus.h', 'core_cm1.h', 'core_cm3.h',
-            'core_cm4.h', 'core_cm7.h', 'core_cm23.h', 'core_cm33.h',
-            'core_cm35p.h', 'core_armv8mbl.h', 'core_armv8mml.h',
-            'core_sc000.h', 'core_sc300.h',
-            'mpu_armv7.h', 'mpu_armv8.h', 'tz_context.h'
-        )
-        New-Item -ItemType Directory $cmsisDest -Force | Out-Null
+        Write-Host ("[CMSIS] Fetching {0} missing header(s) from CMSIS_5 {1}..." -f $missing.Count, $cmsisTag) -ForegroundColor Cyan
         $failed = @()
-        for ($fi = 0; $fi -lt $cmsisFiles.Count; $fi++) {
-            $f = $cmsisFiles[$fi]
-            Write-Host ("`r  [{0,2}/{1}]  {2,-36}" -f ($fi + 1), $cmsisFiles.Count, $f) -NoNewline
-            try {
-                Invoke-Download "$baseUrl/$f" "$cmsisDest\$f"
-            } catch {
-                $failed += $f
-            }
+        for ($fi = 0; $fi -lt $missing.Count; $fi++) {
+            $f = $missing[$fi]
+            Write-Host ("`r  [{0,2}/{1}]  {2,-36}" -f ($fi + 1), $missing.Count, $f) -NoNewline
+            try { Invoke-Download "$baseUrl/$f" "$cmsisDest\$f" } catch { $failed += $f }
         }
         Write-Host ""
         if ($failed.Count -eq 0) {
-            New-Item -ItemType File -Path $cmsisFlag -Force | Out-Null
-            Write-Host ("  {0} files" -f $cmsisFiles.Count) -ForegroundColor DarkGray
             Write-Host "[CMSIS] Done  ->  $cmsisDest" -ForegroundColor Green
         } else {
             Write-Host "[CMSIS] Failed to download: $($failed -join ', ')" -ForegroundColor Yellow
@@ -1339,8 +1378,7 @@ if ($mcu.Arch -eq "ARM" -and $mcu.NeedsCmsis) {
         }
     } else {
         Write-Host ""
-        Write-Host "[CMSIS] Already in shared tools." -ForegroundColor Green
-        Write-Host "  (delete $cmsisFlag to force re-download)" -ForegroundColor DarkGray
+        Write-Host "[CMSIS] All headers already present." -ForegroundColor Green
     }
 }
 
@@ -1460,46 +1498,55 @@ else()
     set(LINKER_WARN_FLAGS ",--no-warn-rwx-segments")
     set(NOSTARTFILES "")
 endif()
+set(LD_SCRIPT "${CMAKE_SOURCE_DIR}/${MCU_LD_SCRIPT}")
 set(CMAKE_EXE_LINKER_FLAGS
-    "${CPU_FLAGS} ${FLOAT_FLAGS} ${NOSTARTFILES} -T${CMAKE_SOURCE_DIR}/${MCU_LD_SCRIPT} -Wl,--gc-sections${LINKER_WARN_FLAGS} --specs=nano.specs -lm -lnosys"
+    "${CPU_FLAGS} ${FLOAT_FLAGS} ${NOSTARTFILES} -T${LD_SCRIPT} -Wl,--gc-sections,-Map=${CMAKE_BINARY_DIR}/${PROJECT_NAME}.map,--cref${LINKER_WARN_FLAGS} --specs=nano.specs -lm -lnosys"
     CACHE STRING "" FORCE)
-
-add_definitions(-D${MCU_DEFINE})
 
 # ================================================================
 # USER FILES  —  add your .h and .c paths here
 # ================================================================
-# Include dirs: paths to folders that contain your .h files
-include_directories(
-    user/inc        # your headers  (auto-included)
+# CONFIGURE_DEPENDS makes CMake re-scan the directory at build time, so
+# adding/removing a .c in user/src/ doesn't need a manual cmake reconfigure.
+file(GLOB_RECURSE USER_SOURCES CONFIGURE_DEPENDS "user/src/*.c")
+# file(GLOB_RECURSE EXTRA_SRC  CONFIGURE_DEPENDS "extra/src/*.c")
+# list(APPEND USER_SOURCES ${EXTRA_SRC})
+# list(APPEND USER_SOURCES "lib/foo.c")
+
+# Header search paths
+set(USER_INCLUDES
+    user/inc
     device/inc
     # path/to/extra/inc
 )
-
-# Sources: every .c in user/src/ is compiled automatically.
-# Append extra files or whole directories below as needed:
-file(GLOB_RECURSE USER_SOURCES "user/src/*.c")
-# file(GLOB_RECURSE EXTRA_SRC  "extra/src/*.c")
-# list(APPEND USER_SOURCES ${EXTRA_SRC})
-# list(APPEND USER_SOURCES "lib/foo.c")
 # ================================================================
+
+# Picks up device/src/_weak_stubs.c if setup.ps1 generated one (chip-specific
+# fallbacks for symbols WCH's system_*.c expects the user to provide).
+file(GLOB DEVICE_EXTRA_SOURCES CONFIGURE_DEPENDS "device/src/_weak_stubs.c")
+
+set(SOURCES ${USER_SOURCES} ${MCU_STARTUP} ${MCU_SYSTEM} ${DEVICE_EXTRA_SOURCES})
+add_executable(__PROJ__.elf ${SOURCES})
+
+target_include_directories(__PROJ__.elf PRIVATE ${USER_INCLUDES})
+target_compile_definitions(__PROJ__.elf PRIVATE ${MCU_DEFINE})
 
 if(MCU_NEEDS_CMSIS)
     if(DEFINED CMSIS_DIR AND EXISTS "${CMSIS_DIR}")
-        include_directories("${CMSIS_DIR}")
+        target_include_directories(__PROJ__.elf PRIVATE "${CMSIS_DIR}")
     else()
-        include_directories(cmsis)  # fallback to local copy
+        target_include_directories(__PROJ__.elf PRIVATE cmsis)
     endif()
 endif()
 
-set(SOURCES ${USER_SOURCES} ${MCU_STARTUP} ${MCU_SYSTEM})
-
-add_executable(__PROJ__.elf ${SOURCES})
+# Without this the linker script change doesn't trigger a re-link
+# (Ninja doesn't see it through -T<path> alone).
+set_target_properties(__PROJ__.elf PROPERTIES LINK_DEPENDS "${LD_SCRIPT}")
 
 add_custom_command(TARGET __PROJ__.elf POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:__PROJ__.elf>
-            ${CMAKE_BINARY_DIR}/__PROJ__.hex
-    COMMENT "HEX: __PROJ__.hex" VERBATIM)
+    COMMAND ${CMAKE_OBJCOPY} -O ihex   $<TARGET_FILE:__PROJ__.elf> ${CMAKE_BINARY_DIR}/__PROJ__.hex
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:__PROJ__.elf> ${CMAKE_BINARY_DIR}/__PROJ__.bin
+    COMMENT "Generating __PROJ__.hex / __PROJ__.bin" VERBATIM)
 add_custom_command(TARGET __PROJ__.elf POST_BUILD
     COMMAND ${CMAKE_SIZE_UTIL} $<TARGET_FILE:__PROJ__.elf>
     COMMENT "Firmware size:" VERBATIM)
@@ -1517,12 +1564,13 @@ Write-NewFile "$CmakeDir\build_config.cmake" @"
 # ==============================================================
 
 # ---------- Optimization ----------
-# -O0  None  - no optimization, best for debugging            (default)
-# -O1  Light - mild optimizations, mostly still debuggable
-# -Os  Size  - minimize Flash usage  (good for space-limited chips)
-# -O2  Speed - balanced speed and size
-# -O3  Max   - maximum speed, may increase code size
-set(BUILD_OPT "-O0")
+# -O0  None       - no optimization, easiest to step through, but 2-3x larger
+# -Og  Debug      - optimizations that don't hurt debugging  (recommended default)
+# -O1  Light      - mild optimizations, mostly still debuggable
+# -Os  Size       - minimize Flash usage  (recommended for production / size-limited MCUs)
+# -O2  Speed      - balanced speed and size
+# -O3  Max        - maximum speed, may increase code size
+set(BUILD_OPT "-Og")
 
 # ---------- C standard ----------
 # c99 / c11 / c17 / gnu11  (gnu11 = C11 + GCC extensions, recommended)
@@ -1555,9 +1603,23 @@ set(BUILD_CPU_FLAGS_OVERRIDE "$($mcu.CpuFlags)$(if ($mcu.FpuFlags) { " " + $mcu.
 set(BUILD_EXTRA_DEFINES "")
 
 # ---------- Extra compiler flags ----------
-# Anything not covered above.
-# Example: "-fno-exceptions -fno-rtti -Wno-unused-variable"
-set(BUILD_EXTRA_FLAGS "")
+# Defaults below favor single-precision float for chips with SP-only FPU
+# (STM32F4/G4/L4, CH32V30x). Beginners often write `x * 1.5` instead of
+# `x * 1.5f` and silently pay the softfloat cost - these flags catch and
+# prevent that.
+#
+#   -fsingle-precision-constant : literals like 1.5 stay float instead of
+#                                 double, so they don't trigger softfloat
+#                                 __muldf3 / __adddf3 calls on every use
+#   -Wdouble-promotion          : warn when float still gets promoted to
+#                                 double anyway (e.g. printf("%f", x),
+#                                 sin(x) instead of sinf(x))
+#   -fno-math-errno             : math.h functions skip errno write
+#                                 (~50 B per call, harmless on embedded)
+#
+# Remove -fsingle-precision-constant if you actually need double precision
+# (e.g. on STM32H7 with DP-FPU, or numerical algorithms).
+set(BUILD_EXTRA_FLAGS "-fsingle-precision-constant -Wdouble-promotion -fno-math-errno")
 "@
 
 # ---- cmake/toolchain.cmake ----
@@ -1632,6 +1694,15 @@ foreach ($ln in Get-Content "$root\cmake\tool_paths.cmake" -EA SilentlyContinue)
 if (-not $cmakeExe) { $c = Get-Command cmake -EA SilentlyContinue; if ($c) { $cmakeExe = $c.Source } }
 if (-not $cmakeExe) { Write-Host 'cmake not found - run setup.ps1' -ForegroundColor Red; exit 1 }
 
+# -Clean wipes the build directory so the next configure starts from scratch.
+# This is what "clean build" should mean. Just running `ninja clean` only
+# deletes .obj/.elf - CMakeCache.txt and build.ninja survive, so a stale
+# file(GLOB) list (without CONFIGURE_DEPENDS) keeps haunting the build.
+if ($Clean -and (Test-Path $buildDir)) {
+    Write-Host "Wiping $buildDir ..." -ForegroundColor Cyan
+    Remove-Item -Recurse -Force $buildDir
+}
+
 # Configure (silent; only warnings/errors printed)
 $confArgs = @('-S',$root, '-B',$buildDir, '-G','Ninja',
               "-DCMAKE_TOOLCHAIN_FILE=$root\cmake\toolchain.cmake",
@@ -1641,9 +1712,7 @@ if ($ninjaExe) { $confArgs += "-DCMAKE_MAKE_PROGRAM=$ninjaExe" }
     ForEach-Object { Write-Host "$_" -ForegroundColor Yellow }
 
 # Build
-$buildArgs = @('--build', $buildDir)
-if ($Clean) { $buildArgs += '--clean-first' }
-& $cmakeExe @buildArgs
+& $cmakeExe --build $buildDir
 $exitCode = $LASTEXITCODE
 
 # Size table (optional - runs only if scripts/show-size.ps1 exists)
@@ -1693,10 +1762,13 @@ if ($flashTotal -gt 0) {
     $rp = [int]($ramUsed   * 100 / $ramTotal)
     $fc = if ($fp -lt 70) { 'Green' } elseif ($fp -lt 90) { 'Yellow' } else { 'Red' }
     $rc = if ($rp -lt 70) { 'Green' } elseif ($rp -lt 90) { 'Yellow' } else { 'Red' }
-    $fb = [string]::new([char]0x2588, [int]($fp/5))
-    $fe = [string]::new([char]0x2591, 20 - [int]($fp/5))
-    $rb = [string]::new([char]0x2588, [int]($rp/5))
-    $re = [string]::new([char]0x2591, 20 - [int]($rp/5))
+    # Clamp bar segments to [0,20] so >100% overflow doesn't crash [string]::new()
+    $ff = [Math]::Max(0, [Math]::Min(20, [int]($fp/5)))
+    $rf = [Math]::Max(0, [Math]::Min(20, [int]($rp/5)))
+    $fb = [string]::new([char]0x2588, $ff)
+    $fe = [string]::new([char]0x2591, 20 - $ff)
+    $rb = [string]::new([char]0x2588, $rf)
+    $re = [string]::new([char]0x2591, 20 - $rf)
     Write-Host $hr -ForegroundColor DarkGray
     Write-Host '   Flash  [' -NoNewline -ForegroundColor White
     if ($fb) { Write-Host $fb -NoNewline -ForegroundColor $fc }
