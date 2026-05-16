@@ -109,6 +109,17 @@ $MCU_DB = @(
     @{ Family="STM32F4xx  (Cortex-M4F)";   Pattern="stm32f4"; Arch="ARM"
        CpuFlags="-mcpu=cortex-m4 -mthumb";    FloatABI="hard"; FpuFlags="-mfpu=fpv4-sp-d16"
        Define="STM32F407xx"; Header="stm32f4xx.h"
+       # F4 has ~17 chip variants - most map model->define with the "xx" suffix,
+       # but F401/F411 split by flash size (xC <=256K, xE >=384K). F410/F412 split
+       # by *package* not flash, so they fall back to the default; override
+       # MCU_DEFINE in build_config.cmake if you use one (e.g. STM32F410Tx).
+       DefineByModel  = @{ '401'='STM32F401xC'; '405'='STM32F405xx'; '407'='STM32F407xx'; '411'='STM32F411xE'; '413'='STM32F413xx'; '415'='STM32F415xx'; '417'='STM32F417xx'; '423'='STM32F423xx'; '427'='STM32F427xx'; '429'='STM32F429xx'; '437'='STM32F437xx'; '439'='STM32F439xx'; '446'='STM32F446xx'; '469'='STM32F469xx'; '479'='STM32F479xx' }
+       StartupByModel = @{ '401'='startup_stm32f401xc.s'; '405'='startup_stm32f405xx.s'; '407'='startup_stm32f407xx.s'; '411'='startup_stm32f411xe.s'; '413'='startup_stm32f413xx.s'; '415'='startup_stm32f415xx.s'; '417'='startup_stm32f417xx.s'; '423'='startup_stm32f423xx.s'; '427'='startup_stm32f427xx.s'; '429'='startup_stm32f429xx.s'; '437'='startup_stm32f437xx.s'; '439'='startup_stm32f439xx.s'; '446'='startup_stm32f446xx.s'; '469'='startup_stm32f469xx.s'; '479'='startup_stm32f479xx.s' }
+       # F401 splits by flash size (xC <=256K, xE >=384K). F411 does NOT split -
+       # ST ships a single STM32F411xE / startup_stm32f411xe.s used for ALL F411
+       # parts (CB/CC/CE), so only F401 needs an override here.
+       DefineByModelFlash  = @{ '401_D'='STM32F401xE'; '401_E'='STM32F401xE' }
+       StartupByModelFlash = @{ '401_D'='startup_stm32f401xe.s'; '401_E'='startup_stm32f401xe.s' }
        Repo="STMicroelectronics/cmsis_device_f4"; RepoType="STM"
        StartupGlob="startup_stm32f407xx.s"; SystemFile="system_stm32f4xx.c"
        NeedsCmsis=$true
@@ -125,6 +136,9 @@ $MCU_DB = @(
     @{ Family="STM32G4xx  (Cortex-M4F)";   Pattern="stm32g4"; Arch="ARM"
        CpuFlags="-mcpu=cortex-m4 -mthumb";    FloatABI="hard"; FpuFlags="-mfpu=fpv4-sp-d16"
        Define="STM32G431xx"; Header="stm32g4xx.h"
+       # G4 follows the generic STM32<XYY>xx pattern, no flash-tier exceptions.
+       DefineByModel  = @{ '431'='STM32G431xx'; '441'='STM32G441xx'; '471'='STM32G471xx'; '473'='STM32G473xx'; '474'='STM32G474xx'; '483'='STM32G483xx'; '484'='STM32G484xx'; '491'='STM32G491xx'; '4A1'='STM32G4A1xx' }
+       StartupByModel = @{ '431'='startup_stm32g431xx.s'; '441'='startup_stm32g441xx.s'; '471'='startup_stm32g471xx.s'; '473'='startup_stm32g473xx.s'; '474'='startup_stm32g474xx.s'; '483'='startup_stm32g483xx.s'; '484'='startup_stm32g484xx.s'; '491'='startup_stm32g491xx.s'; '4A1'='startup_stm32g4a1xx.s' }
        Repo="STMicroelectronics/cmsis_device_g4"; RepoType="STM"
        StartupGlob="startup_stm32g431xx.s"; SystemFile="system_stm32g4xx.c"
        NeedsCmsis=$true
@@ -133,6 +147,9 @@ $MCU_DB = @(
     @{ Family="STM32L4xx  (Cortex-M4F)";   Pattern="stm32l4"; Arch="ARM"
        CpuFlags="-mcpu=cortex-m4 -mthumb";    FloatABI="hard"; FpuFlags="-mfpu=fpv4-sp-d16"
        Define="STM32L476xx"; Header="stm32l4xx.h"
+       # L4 follows the generic STM32L<MMM>xx pattern, no flash-tier exceptions.
+       DefineByModel  = @{ '412'='STM32L412xx'; '422'='STM32L422xx'; '431'='STM32L431xx'; '432'='STM32L432xx'; '433'='STM32L433xx'; '442'='STM32L442xx'; '443'='STM32L443xx'; '451'='STM32L451xx'; '452'='STM32L452xx'; '462'='STM32L462xx'; '471'='STM32L471xx'; '475'='STM32L475xx'; '476'='STM32L476xx'; '485'='STM32L485xx'; '486'='STM32L486xx'; '496'='STM32L496xx'; '4A6'='STM32L4A6xx' }
+       StartupByModel = @{ '412'='startup_stm32l412xx.s'; '422'='startup_stm32l422xx.s'; '431'='startup_stm32l431xx.s'; '432'='startup_stm32l432xx.s'; '433'='startup_stm32l433xx.s'; '442'='startup_stm32l442xx.s'; '443'='startup_stm32l443xx.s'; '451'='startup_stm32l451xx.s'; '452'='startup_stm32l452xx.s'; '462'='startup_stm32l462xx.s'; '471'='startup_stm32l471xx.s'; '475'='startup_stm32l475xx.s'; '476'='startup_stm32l476xx.s'; '485'='startup_stm32l485xx.s'; '486'='startup_stm32l486xx.s'; '496'='startup_stm32l496xx.s'; '4A6'='startup_stm32l4a6xx.s' }
        Repo="STMicroelectronics/cmsis_device_l4"; RepoType="STM"
        StartupGlob="startup_stm32l476xx.s"; SystemFile="system_stm32l4xx.c"
        NeedsCmsis=$true
@@ -141,6 +158,10 @@ $MCU_DB = @(
     @{ Family="STM32H7xx  (Cortex-M7)";    Pattern="stm32h7"; Arch="ARM"
        CpuFlags="-mcpu=cortex-m7 -mthumb";    FloatABI="hard"; FpuFlags="-mfpu=fpv5-d16"
        Define="STM32H743xx"; Header="stm32h7xx.h"
+       # H7 follows the generic STM32H<MMM>xx pattern. Dual-core variants (H745/
+       # H747/H755/H757) build CM7 core only by default; override for CM4 if needed.
+       DefineByModel  = @{ '723'='STM32H723xx'; '725'='STM32H725xx'; '730'='STM32H730xx'; '733'='STM32H733xx'; '735'='STM32H735xx'; '742'='STM32H742xx'; '743'='STM32H743xx'; '745'='STM32H745xx'; '747'='STM32H747xx'; '750'='STM32H750xx'; '753'='STM32H753xx'; '755'='STM32H755xx'; '757'='STM32H757xx'; '7A3'='STM32H7A3xx'; '7B0'='STM32H7B0xx'; '7B3'='STM32H7B3xx' }
+       StartupByModel = @{ '723'='startup_stm32h723xx.s'; '725'='startup_stm32h725xx.s'; '730'='startup_stm32h730xx.s'; '733'='startup_stm32h733xx.s'; '735'='startup_stm32h735xx.s'; '742'='startup_stm32h742xx.s'; '743'='startup_stm32h743xx.s'; '745'='startup_stm32h745xx.s'; '747'='startup_stm32h747xx.s'; '750'='startup_stm32h750xx.s'; '753'='startup_stm32h753xx.s'; '755'='startup_stm32h755xx.s'; '757'='startup_stm32h757xx.s'; '7A3'='startup_stm32h7a3xx.s'; '7B0'='startup_stm32h7b0xx.s'; '7B3'='startup_stm32h7b3xx.s' }
        Repo="STMicroelectronics/cmsis_device_h7"; RepoType="STM"
        StartupGlob="startup_stm32h743xx.s"; SystemFile="system_stm32h7xx.c"
        NeedsCmsis=$true
@@ -174,9 +195,21 @@ $MCU_DB = @(
     @{ Family="CH32V30x/V307 (QingKe V4F, RV32IMAFC)"; Pattern="ch32v3"; Arch="RISCV"
        CpuFlags="-march=rv32imafc -mabi=ilp32f";        FloatABI=""; FpuFlags=""
        Define="CH32V30X"; Header="ch32v30x.h"
-       # 3-digit model number in part name → RAM size:
-       #   V303/V305 (48-pin, low-end): 32K RAM   V307/V303C (bigger): 64K RAM
-       RamByModel = @{ '303'=32; '305'=32; '307'=64 }
+       # RAM size depends on BOTH model and flash code:
+       #   V303CB / V303RB (Flash B=128K): 32K SRAM (default)
+       #   V303RC / V303VC (Flash C=256K): 64K SRAM (default)
+       #   V305/V307: 64K SRAM regardless
+       # Physical flash is 480K - the rest is "Extended SRAM zone" remappable
+       # via User Option Bytes (288K code+32K SRAM, 192K+128K, etc.). Linker
+       # script uses the default split; reflash OPT bytes to change it.
+       RamByModel       = @{ '303'=32; '305'=64; '307'=64 }
+       RamByFlashCode   = @{ 'B'=32;  'C'=64;  'D'=64 }
+       # WCH ships TWO startup variants + matching ifdef blocks in ch32v30x.h.
+       # Without an explicit CH32V30x_D8 / D8C define, ch32v30x.h falls back to
+       # D8C (V307), which mis-initialises peripherals on a V303 chip. Pick the
+       # right startup AND the right define from the model number.
+       StartupByModel = @{ '303'='startup_ch32v30x_D8.S'; '305'='startup_ch32v30x_D8C.S'; '307'='startup_ch32v30x_D8C.S' }
+       ExtraDefineByModel = @{ '303'='CH32V30x_D8'; '305'='CH32V30x_D8C'; '307'='CH32V30x_D8C' }
        Repo="openwch/ch32v307"; RepoType="WCH"
        StartupGlob="startup_ch32v30*.S"; SystemFile="system_ch32v30x.c"
        NeedsCmsis=$false
@@ -737,7 +770,7 @@ SECTIONS
 # STEP 0: Check for VS Code and extensions (install if missing)
 # Results are collected into $vscodePath / $extStatus for display in STEP 2.
 # ==============================================================
-$neededExts = @('ms-vscode.cpptools', 'marus25.cortex-debug', 'actboy168.tasks')
+$neededExts = @('ms-vscode.cpptools', 'marus25.cortex-debug', 'mcu-debug.peripheral-viewer', 'eclipse-cdt.peripheral-inspector', 'actboy168.tasks')
 $extStatus  = @{}  # 'found' | 'installed' | 'missing'
 
 function Find-VsCode {
@@ -854,6 +887,7 @@ $ramKB          = $mcu.RamKB
 $flashBase      = $mcu.FlashBase
 $ramBase        = $mcu.RamBase
 $mcuDefine      = $mcu.Define
+$mcuExtraDefine = ''                  # secondary chip-variant define (e.g. CH32V30x_D8 vs D8C)
 $mcuStartupGlob = $mcu.StartupGlob
 
 Write-Host ""
@@ -863,23 +897,49 @@ if ($userInput -match '^(?:STM32|CH32)\w(\d{3})[A-Za-z]([468BCDEFGbcdefg])') {
     $modelCode = $Matches[1]
     $memCode   = $Matches[2].ToUpper()   # normalize: 'b' -> 'B' for hashtable lookup
     $flashKB   = $FLASH_CODES[$memCode]
+    # Flash-code override (single-model families like STM32F1: 4/6 -> x6, 8/B -> xB).
     if ($mcu.DefineByFlashCode -and $mcu.DefineByFlashCode.ContainsKey($memCode)) {
         $mcuDefine = $mcu.DefineByFlashCode[$memCode]
     }
     if ($mcu.StartupByFlashCode -and $mcu.StartupByFlashCode.ContainsKey($memCode)) {
         $mcuStartupGlob = $mcu.StartupByFlashCode[$memCode]
     }
-    # Auto-detect RAM from flash code (e.g. STM32F1 where they correlate)
-    if ($mcu.RamByFlashCode -and $mcu.RamByFlashCode.ContainsKey($memCode)) {
-        $ramKB = $mcu.RamByFlashCode[$memCode]
+    # Model-code override (multi-model families like STM32F4/G4/L4/H7).
+    if ($mcu.DefineByModel -and $mcu.DefineByModel.ContainsKey($modelCode)) {
+        $mcuDefine = $mcu.DefineByModel[$modelCode]
     }
-    # Auto-detect RAM from 3-digit model number (e.g. CH32V303→32K, CH32V307→64K)
+    if ($mcu.StartupByModel -and $mcu.StartupByModel.ContainsKey($modelCode)) {
+        $mcuStartupGlob = $mcu.StartupByModel[$modelCode]
+    }
+    # Model+flash combined override - for parts like STM32F401 / STM32F411 where the
+    # define depends on BOTH the model and the flash density (xC <=256K, xE >=384K).
+    # Key format: "<modelCode>_<memCode>" e.g. "401_E", "411_C".
+    $mfKey = "${modelCode}_${memCode}"
+    if ($mcu.DefineByModelFlash -and $mcu.DefineByModelFlash.ContainsKey($mfKey)) {
+        $mcuDefine = $mcu.DefineByModelFlash[$mfKey]
+    }
+    if ($mcu.StartupByModelFlash -and $mcu.StartupByModelFlash.ContainsKey($mfKey)) {
+        $mcuStartupGlob = $mcu.StartupByModelFlash[$mfKey]
+    }
+    # RAM: Model baseline first, then FlashCode override.
+    # Order matters - e.g. CH32V303 needs 32K (RamByModel default), but
+    # V303RC/VC variants (flash C=256K) bump to 64K via RamByFlashCode.
     if ($mcu.RamByModel -and $mcu.RamByModel.ContainsKey($modelCode)) {
         $ramKB = $mcu.RamByModel[$modelCode]
     }
+    if ($mcu.RamByFlashCode -and $mcu.RamByFlashCode.ContainsKey($memCode)) {
+        $ramKB = $mcu.RamByFlashCode[$memCode]
+    }
+    # Auto-detect chip-variant secondary define from model number.
+    # Example: CH32V303 needs CH32V30x_D8 + startup_ch32v30x_D8.S, CH32V307 needs
+    # CH32V30x_D8C + startup_ch32v30x_D8C.S. Without this the vendor header falls
+    # back to D8C and a V303 board mis-initialises its peripherals.
+    if ($mcu.ExtraDefineByModel -and $mcu.ExtraDefineByModel.ContainsKey($modelCode)) {
+        $mcuExtraDefine = $mcu.ExtraDefineByModel[$modelCode]
+    }
     Write-Host ("  Flash    :  {0,5} KB  (code '{1}' from part number)" -f $flashKB, $memCode) -ForegroundColor Cyan
     Write-Host ("  RAM      :  {0,5} KB  (model '{1}' detected)"        -f $ramKB, $modelCode)  -ForegroundColor Cyan
-    Write-Host ("  Define   :  {0}" -f $mcuDefine) -ForegroundColor Cyan
+    Write-Host ("  Define   :  {0}{1}" -f $mcuDefine, $(if ($mcuExtraDefine) { " + $mcuExtraDefine" } else { "" })) -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Override Flash KB? [Enter = keep $flashKB]:" -ForegroundColor Yellow
     $ov = Read-Host
@@ -1506,18 +1566,21 @@ set(CMAKE_EXE_LINKER_FLAGS
 # ================================================================
 # USER FILES  —  add your .h and .c paths here
 # ================================================================
-# CONFIGURE_DEPENDS makes CMake re-scan the directory at build time, so
-# adding/removing a .c in user/src/ doesn't need a manual cmake reconfigure.
-file(GLOB_RECURSE USER_SOURCES CONFIGURE_DEPENDS "user/src/*.c")
-# file(GLOB_RECURSE EXTRA_SRC  CONFIGURE_DEPENDS "extra/src/*.c")
-# list(APPEND USER_SOURCES ${EXTRA_SRC})
-# list(APPEND USER_SOURCES "lib/foo.c")
+# Sources: list every .c path or glob your project needs in ONE call.
+# Mix concrete files and wildcards freely. CONFIGURE_DEPENDS tells CMake to
+# re-scan when files appear or disappear, so a new .c shows up automatically.
+file(GLOB_RECURSE USER_SOURCES CONFIGURE_DEPENDS
+    "user/src/*.c"
+    # "lib/foo.c"
+    # "third_party/SomeLib/*.c"
+)
 
-# Header search paths
+# Header search paths: directories that contain your .h files.
 set(USER_INCLUDES
     user/inc
     device/inc
-    # path/to/extra/inc
+    # "lib/inc"
+    # "third_party/SomeLib"
 )
 # ================================================================
 
@@ -1530,6 +1593,11 @@ add_executable(__PROJ__.elf ${SOURCES})
 
 target_include_directories(__PROJ__.elf PRIVATE ${USER_INCLUDES})
 target_compile_definitions(__PROJ__.elf PRIVATE ${MCU_DEFINE})
+# Optional chip-variant define (e.g. CH32V30x_D8 vs CH32V30x_D8C).
+# Empty for chips that don't need it.
+if(MCU_EXTRA_DEFINE)
+    target_compile_definitions(__PROJ__.elf PRIVATE ${MCU_EXTRA_DEFINE})
+endif()
 
 if(MCU_NEEDS_CMSIS)
     if(DEFINED CMSIS_DIR AND EXISTS "${CMSIS_DIR}")
@@ -1895,7 +1963,7 @@ $cmakeTasksTmpl = @'
             "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build.ps1", "-Clean"],
             "group": "build",
             "problemMatcher": []
-        }__FLASH_TASKS__
+        }__FLASH_TASKS____STATIC_TASKS__
     ]
 }
 '@
@@ -1960,7 +2028,125 @@ if ($ocdFwd) {
     $flashTasksJson = ''  # no OpenOCD found - cmake tasks only
 }
 
-$tasksJsonContent = $cmakeTasksTmpl.Replace('__CMAKE__', $cmakeFwd).Replace('__NINJA__', $ninjaFwd).Replace('__FLASH_TASKS__', $flashTasksJson)
+# Static analysis tasks (objdump/readelf/size/nm).
+# Logic lives in .vscode/scripts/elf-tools.ps1 (generated below).
+# Tasks call it via `powershell -File` so each path/arg is quoted by VS Code
+# individually — sidesteps Windows command-line quote-stripping that breaks
+# `-Command` inline-strings when toolchain paths contain spaces.
+$elfToolsScript = @'
+# Generated by setup.ps1 - do not edit manually.
+# Helper for VS Code tasks: runs binutils tools on the ELF and (where applicable)
+# writes output to a file next to the ELF and opens it in VS Code.
+
+param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet('disassembly','readelf','size','nm')]
+    [string]$Action,
+
+    [Parameter(Mandatory=$true)]
+    [string]$Elf,
+
+    [Parameter(Mandatory=$true)]
+    [string]$Tool
+)
+
+$ErrorActionPreference = 'Stop'
+
+if (-not (Test-Path $Tool)) { Write-Error "Tool not found: $Tool"; exit 1 }
+if (-not (Test-Path $Elf))  { Write-Error "ELF not found: $Elf (build first)"; exit 1 }
+
+switch ($Action) {
+    'disassembly' {
+        $out = $Elf -replace '\.elf$', '.lst'
+        & $Tool -d -S -l --demangle $Elf | Out-File -Encoding utf8 $out
+        Write-Host "Wrote disassembly: $out" -ForegroundColor Green
+        code $out
+    }
+    'readelf' {
+        $out = $Elf -replace '\.elf$', '.elf.txt'
+        & $Tool -a $Elf | Out-File -Encoding utf8 $out
+        Write-Host "Wrote ELF info: $out" -ForegroundColor Green
+        code $out
+    }
+    'size' {
+        & $Tool -A $Elf
+    }
+    'nm' {
+        $out = $Elf -replace '\.elf$', '.syms.txt'
+        & $Tool --print-size --size-sort --radix=x $Elf | Out-File -Encoding utf8 $out
+        Write-Host "Wrote symbol table: $out" -ForegroundColor Green
+        code $out
+    }
+}
+'@
+$scriptsDir = Join-Path $VsCodeDir 'scripts'
+if (-not (Test-Path $scriptsDir)) { New-Item -ItemType Directory -Path $scriptsDir | Out-Null }
+Write-InfraFile "$scriptsDir\elf-tools.ps1" $elfToolsScript
+
+# Build the 4 tasks. Each arg is a separate JSON string so VS Code quotes
+# spaces correctly. $gccBinFwd/$gccPrefix/$projName are expanded NOW; the
+# `${workspaceFolder} stays literal for VS Code to expand at task-run time.
+$staticTasksJson = @"
+        ,{
+            "label": "disassembly -> .lst",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "`${workspaceFolder}/.vscode/scripts/elf-tools.ps1",
+                "-Action", "disassembly",
+                "-Elf", "`${workspaceFolder}/build/cmake/$projName.elf",
+                "-Tool", "$gccBinFwd/${gccPrefix}objdump.exe"
+            ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "dedicated" },
+            "problemMatcher": []
+        },{
+            "label": "elf info (readelf -a)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "`${workspaceFolder}/.vscode/scripts/elf-tools.ps1",
+                "-Action", "readelf",
+                "-Elf", "`${workspaceFolder}/build/cmake/$projName.elf",
+                "-Tool", "$gccBinFwd/${gccPrefix}readelf.exe"
+            ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "dedicated" },
+            "problemMatcher": []
+        },{
+            "label": "section sizes",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "`${workspaceFolder}/.vscode/scripts/elf-tools.ps1",
+                "-Action", "size",
+                "-Elf", "`${workspaceFolder}/build/cmake/$projName.elf",
+                "-Tool", "$gccBinFwd/${gccPrefix}size.exe"
+            ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "dedicated", "focus": true },
+            "problemMatcher": []
+        },{
+            "label": "symbol table (nm) -> .syms.txt",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "`${workspaceFolder}/.vscode/scripts/elf-tools.ps1",
+                "-Action", "nm",
+                "-Elf", "`${workspaceFolder}/build/cmake/$projName.elf",
+                "-Tool", "$gccBinFwd/${gccPrefix}nm.exe"
+            ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "dedicated" },
+            "problemMatcher": []
+        }
+"@
+
+$tasksJsonContent = $cmakeTasksTmpl.Replace('__CMAKE__', $cmakeFwd).Replace('__NINJA__', $ninjaFwd).Replace('__FLASH_TASKS__', $flashTasksJson).Replace('__STATIC_TASKS__', $staticTasksJson)
 Write-InfraFile "$VsCodeDir\tasks.json" $tasksJsonContent
 
 # ---- .vscode/c_cpp_properties.json ----
@@ -2005,7 +2191,7 @@ $gdbFwd = if ($fastGdbFwd) { $fastGdbFwd }
           elseif (Test-Path $gdbExe) { $gdbExe.Replace('\', '/') }
           else { '' }
 $gdbPathLine = if ($gdbFwd) { "`"gdbPath`": `"$gdbFwd`"," } else { '' }
-$svdLine     = if ($svdRelPath) { "`"svdFile`": `"$svdRelPath`"," } else { "`"svdFile`": `"`"," }
+$svdLine     = if ($svdRelPath) { "`"definitionPath`": `"$svdRelPath`"," } else { "`"definitionPath`": `"`"," }
 
 if ($mcu.Arch -eq 'ARM' -and $ocdTarget) {
     $jlinkBlock = if ($jlinkDevice) { @"
@@ -2138,16 +2324,17 @@ $needsCmsis = if ($mcu.NeedsCmsis) { "TRUE" } else { "FALSE" }
 
 $mcuConfigContent = @"
 # Auto-generated by setup.ps1 - re-run to change MCU.
-set(MCU_FAMILY    "$($mcu.Family)")
-set(MCU_ARCH      "$($mcu.Arch)")
-set(MCU_CPU_FLAGS "$($mcu.CpuFlags)")
-set(MCU_FLOAT_ABI "$($mcu.FloatABI)")
-set(MCU_FPU_FLAGS "$($mcu.FpuFlags)")
-set(MCU_DEFINE    "$($mcuDefine)")
-set(MCU_STARTUP   "device/src/startup.s")
-set(MCU_SYSTEM    "device/src/$($mcu.SystemFile)")
-set(MCU_LD_SCRIPT "mcu.ld")
-set(MCU_NEEDS_CMSIS $needsCmsis)
+set(MCU_FAMILY       "$($mcu.Family)")
+set(MCU_ARCH         "$($mcu.Arch)")
+set(MCU_CPU_FLAGS    "$($mcu.CpuFlags)")
+set(MCU_FLOAT_ABI    "$($mcu.FloatABI)")
+set(MCU_FPU_FLAGS    "$($mcu.FpuFlags)")
+set(MCU_DEFINE       "$($mcuDefine)")
+set(MCU_EXTRA_DEFINE "$($mcuExtraDefine)")
+set(MCU_STARTUP      "device/src/startup.s")
+set(MCU_SYSTEM       "device/src/$($mcu.SystemFile)")
+set(MCU_LD_SCRIPT    "mcu.ld")
+set(MCU_NEEDS_CMSIS  $needsCmsis)
 "@
 [System.IO.File]::WriteAllText("$CmakeDir\mcu_config.cmake", $mcuConfigContent, [System.Text.Encoding]::UTF8)
 [System.IO.File]::WriteAllText("$CmakeDir\mcu_arch.txt",     $mcu.Arch,          [System.Text.Encoding]::UTF8)
