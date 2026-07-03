@@ -207,8 +207,8 @@ $TOOL_CATALOG = @{
         CheckExe = "arm-none-eabi-gcc.exe"
         Prefix   = "arm-none-eabi-"
         GlobName = "arm-gnu*"
-        DlMB     = 155
-        DiskMB   = 500
+        DlMB     = 291   # actual Content-Length of the 14.2.rel1 mingw zip
+        DiskMB   = 700
         GdbEntry = "bin/arm-none-eabi-gdb.exe"  # zip path; update together with Url if upgrading
     }
     RISCV_GCC = @{
@@ -340,17 +340,30 @@ function Invoke-ExtractTool {
     Expand-Archive $ZipFile $tmp -Force
     Remove-Item $ZipFile -EA SilentlyContinue
 
-    if ($null -ne $Tool.GlobName) {
-        $sub = Get-ChildItem $tmp -Directory | Select-Object -First 1
-        if ($sub) {
-            if (Test-Path $Tool.DestDir) { Remove-Item $Tool.DestDir -Recurse -Force }
-            Move-Item $sub.FullName $Tool.DestDir
-        }
-    } else {
+    # Locate the tool root by finding CheckExe inside the extracted tree.
+    # Handles both zip layouts: with a top-level folder (cmake-3.30.../bin/cmake.exe)
+    # and without one (ARM 14.2 zips put bin/, lib/, ... directly at the zip root —
+    # blindly taking the first subfolder here used to grab the inner arm-none-eabi/
+    # dir and silently discard the actual compiler).
+    $exe = Get-ChildItem $tmp -Recurse -Filter $Tool.CheckExe -File | Select-Object -First 1
+    if (-not $exe) {
+        throw "Extraction failed: $($Tool.CheckExe) not found inside the downloaded archive ($($Tool.Name)). The download may be corrupted - re-run setup.ps1."
+    }
+    $tmpFull = (Get-Item $tmp).FullName
+    $root = if ($exe.Directory.Name -eq 'bin') { $exe.Directory.Parent.FullName } else { $exe.DirectoryName }
+
+    if (Test-Path $Tool.DestDir) { Remove-Item $Tool.DestDir -Recurse -Force }
+    if ($root -eq $tmpFull) {
         New-Item -ItemType Directory -Path $Tool.DestDir -Force | Out-Null
         Get-ChildItem $tmp | Move-Item -Destination $Tool.DestDir -Force
+    } else {
+        Move-Item $root $Tool.DestDir
     }
     Remove-Item $tmp -Recurse -EA SilentlyContinue
+
+    if (-not (Get-ChildItem $Tool.DestDir -Recurse -Filter $Tool.CheckExe -File | Select-Object -First 1)) {
+        throw "Extraction verification failed: $($Tool.CheckExe) is missing in $($Tool.DestDir)"
+    }
 }
 
 # Extract a single file from a remote ZIP using HTTP Range requests.
@@ -362,12 +375,14 @@ function Invoke-ExtractFromZip {
         param($u, $from, $to)
         $r = [System.Net.HttpWebRequest]::Create($u)
         $r.UserAgent = "Mozilla/5.0 (setup.ps1)"
+        $r.Timeout = 30000; $r.ReadWriteTimeout = 300000
         if ($null -ne $from) { $r.AddRange([long]$from, [long]$to) }
         $r.GetResponse()
     }
     # 1. ZIP total size
     $r0 = [System.Net.HttpWebRequest]::Create($ZipUrl)
     $r0.Method = "HEAD"; $r0.UserAgent = "Mozilla/5.0 (setup.ps1)"
+    $r0.Timeout = 30000
     $rs0 = $r0.GetResponse(); $zipSize = $rs0.ContentLength; $rs0.Close()
     # 2. Last 10 MB — contains EOCD and often the entire central directory
     $tailStart = $zipSize - 10MB
@@ -462,6 +477,10 @@ function Invoke-Download {
     } finally {
         $outStr.Close(); $inStr.Close(); $resp.Close()
         Write-Host ("`r" + (' ' * 78) + "`r") -NoNewline  # clear progress line
+    }
+    # A silently truncated download extracts as a broken archive; fail loudly instead.
+    if ($total -gt 0 -and $read -ne $total) {
+        throw ("Download incomplete: got {0:N1} MB of {1:N1} MB. Check your internet connection and re-run setup.ps1." -f ($read / 1MB), ($total / 1MB))
     }
 }
 
