@@ -2179,12 +2179,71 @@ if (Test-Path $gitignoreFile) {
 }
 
 # ==============================================================
+# STEP 8: Verify the toolchain actually runs
+# The real test is not "does the file exist" but "does it execute and
+# report a version". This catches broken/partial downloads, a changed
+# archive layout, wrong CPU architecture, missing DLLs, etc. - whatever
+# changes upstream, if a tool can't run, this stops here instead of
+# claiming success over a broken install.
+# ==============================================================
+function Test-ToolRuns {
+    param([string]$Label, [string]$Exe, [string[]]$VerArgs = @('--version'))
+    if (-not $Exe -or -not (Test-Path $Exe)) {
+        return [pscustomobject]@{ Label = $Label; Ok = $false; Info = 'not found'; Path = $Exe }
+    }
+    # Native tools print --version to stdout or stderr and may exit non-zero;
+    # the reliable signal that the tool actually ran is a version-looking string.
+    # Silence PS error handling so stderr text doesn't trip the top-level trap.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    $line = ''
+    try {
+        $out  = & $Exe @VerArgs 2>&1
+        $line = "$($out | Where-Object { "$_".Trim() } | Select-Object -First 1)".Trim()
+    } catch {
+        $line = "did not run: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return [pscustomobject]@{ Label = $Label; Ok = ($line -match '\d+\.\d+'); Info = $line; Path = $Exe }
+}
+
+Write-Host ""
+Write-Host "--- Verifying toolchain -------------------------------" -ForegroundColor Cyan
+$checks = @()
+if ($gccBin) { $checks += Test-ToolRuns "$($gccPrefix)gcc" (Join-Path $gccBin ($gccPrefix + 'gcc.exe')) }
+$checks += Test-ToolRuns "cmake" $cmakeExe
+$checks += Test-ToolRuns "ninja" $ninjaExe
+if ($activeOcdExe) { $checks += Test-ToolRuns "openocd" $activeOcdExe }
+$gdbCheck = if ($fastGdbFwd) { $fastGdbFwd } elseif ($gdbFwd) { $gdbFwd } else { '' }
+if ($gdbCheck) { $checks += Test-ToolRuns "$($gccPrefix)gdb" $gdbCheck }
+
+$verifyFailed = $false
+foreach ($c in $checks) {
+    if ($c.Ok) {
+        Write-Host ("  [OK  ]  {0,-22}  {1}" -f $c.Label, $c.Info) -ForegroundColor Green
+    } else {
+        $verifyFailed = $true
+        Write-Host ("  [FAIL]  {0,-22}  {1}" -f $c.Label, $c.Info) -ForegroundColor Red
+        if ($c.Path) { Write-Host ("            -> {0}" -f $c.Path) -ForegroundColor DarkGray }
+    }
+}
+
+# ==============================================================
 # Done
 # ==============================================================
 Write-Host ""
-Write-Host "=============================" -ForegroundColor Green
-Write-Host "  Setup complete!" -ForegroundColor Green
-Write-Host "=============================" -ForegroundColor Green
+if ($verifyFailed) {
+    Write-Host "=======================================" -ForegroundColor Yellow
+    Write-Host "  Setup finished WITH WARNINGS" -ForegroundColor Yellow
+    Write-Host "=======================================" -ForegroundColor Yellow
+    Write-Host "  One or more tools above did not run. Delete the affected" -ForegroundColor Yellow
+    Write-Host "  folder under $SharedDir and re-run setup.ps1." -ForegroundColor Yellow
+} else {
+    Write-Host "=============================" -ForegroundColor Green
+    Write-Host "  Setup complete!" -ForegroundColor Green
+    Write-Host "=============================" -ForegroundColor Green
+}
 Write-Host ""
 Write-Host "  Shared tools : $SharedDir" -ForegroundColor DarkGray
 Write-Host "  Project root : $Root"      -ForegroundColor DarkGray
