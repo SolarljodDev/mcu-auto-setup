@@ -624,6 +624,8 @@ SECTIONS
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
 }
+
+ASSERT(_ebss + _Min_Heap_Size + _Min_Stack_Size <= ORIGIN(RAM) + LENGTH(RAM), "RAM overflow: data+bss+heap+stack don't fit")
 "@
     } else {
         # RISC-V WCH style
@@ -760,6 +762,8 @@ SECTIONS
         PROVIDE( _eusrstack = . );
     } >RAM
 }
+
+ASSERT(_ebss <= ORIGIN(RAM) + LENGTH(RAM) - __stack_size, "RAM overflow: data+bss+stack don't fit")
 "@
     }
 }
@@ -1802,10 +1806,12 @@ if ($flashTotal -gt 0) {
     $rp = [int]($ramUsed   * 100 / $ramTotal)
     $fc = if ($fp -lt 70) { 'Green' } elseif ($fp -lt 90) { 'Yellow' } else { 'Red' }
     $rc = if ($rp -lt 70) { 'Green' } elseif ($rp -lt 90) { 'Yellow' } else { 'Red' }
-    $fb = [string]::new([char]0x2588, [int]($fp/5))
-    $fe = [string]::new([char]0x2591, 20 - [int]($fp/5))
-    $rb = [string]::new([char]0x2588, [int]($rp/5))
-    $re = [string]::new([char]0x2591, 20 - [int]($rp/5))
+    $fbar = [Math]::Min(20, [int]($fp/5))
+    $rbar = [Math]::Min(20, [int]($rp/5))
+    $fb = [string]::new([char]0x2588, $fbar)
+    $fe = [string]::new([char]0x2591, 20 - $fbar)
+    $rb = [string]::new([char]0x2588, $rbar)
+    $re = [string]::new([char]0x2591, 20 - $rbar)
     Write-Host $hr -ForegroundColor DarkGray
     Write-Host '   Flash  [' -NoNewline -ForegroundColor White
     if ($fb) { Write-Host $fb -NoNewline -ForegroundColor $fc }
