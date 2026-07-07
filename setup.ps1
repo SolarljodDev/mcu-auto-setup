@@ -1433,11 +1433,28 @@ $ninjaFwd  = $ninjaExe.Replace('\', '/')
 $activeOcdExe = if ($mcu.Arch -eq 'RISCV') { $ocdWchExe } else { $ocdExe }
 $ocdFwd    = if ($activeOcdExe) { $activeOcdExe.Replace('\', '/') } else { '' }
 $cmsisDir  = if ($mcu.NeedsCmsis) { "$SharedDir\cmsis".Replace('\', '/') } else { '' }
-# xpack-OpenOCD (ARM): scripts are in share/openocd/scripts/ next to bin/
+# xpack-OpenOCD (ARM): scripts dir location has moved between releases
+# (e.g. share/openocd/scripts/ vs openocd/scripts/) — search for it instead
+# of hardcoding, so a repackaged/updated archive doesn't silently break flashing.
 # WCH-OpenOCD (MounRiver): wch-riscv.cfg lives directly in bin/ — use bin/ as scripts dir
 $ocdDir = if ($ocdFwd) { ($ocdFwd -replace '/bin/openocd\.exe$', '') } else { '' }
+function Find-OpenOcdScriptsDir {
+    param([string]$OcdDir)
+    if (-not $OcdDir -or -not (Test-Path $OcdDir)) { return $null }
+    $found = Get-ChildItem $OcdDir -Recurse -Directory -Filter 'scripts' -EA SilentlyContinue |
+        Where-Object {
+            (Test-Path (Join-Path $_.FullName 'interface')) -and (Test-Path (Join-Path $_.FullName 'target'))
+        } | Select-Object -First 1
+    if ($found) { return $found.FullName.Replace('\', '/') }
+    return $null
+}
 $ocdScriptsFwd = if ($ocdFwd) {
-    if ($mcu.Arch -eq 'RISCV') { "$ocdDir/bin" } else { "$ocdDir/share/openocd/scripts" }
+    if ($mcu.Arch -eq 'RISCV') {
+        "$ocdDir/bin"
+    } else {
+        $realScripts = Find-OpenOcdScriptsDir -OcdDir $ocdDir
+        if ($realScripts) { $realScripts } else { "$ocdDir/share/openocd/scripts" }
+    }
 } else { '' }
 
 # ==============================================================
