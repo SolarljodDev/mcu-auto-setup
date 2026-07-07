@@ -2215,17 +2215,17 @@ function Test-ToolRuns {
     }
     # Native tools print --version to stdout or stderr and may exit non-zero;
     # the reliable signal that the tool actually ran is a version-looking string.
-    # Silence PS error handling so stderr text doesn't trip the top-level trap.
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
+    # Run through cmd.exe so stdout+stderr are merged by the OS before PowerShell
+    # sees them - PS 5.1 wraps a native command's own stderr lines in ErrorRecord
+    # objects, which $ErrorActionPreference = 'SilentlyContinue' then discards
+    # outright, making stderr-only tools (e.g. openocd) look like they didn't run.
     $line = ''
     try {
-        $out  = & $Exe @VerArgs 2>&1
-        $line = "$($out | Where-Object { "$_".Trim() } | Select-Object -First 1)".Trim()
+        $argStr = ($VerArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
+        $out    = & cmd.exe /c "`"$Exe`" $argStr 2>&1"
+        $line   = "$($out | Where-Object { "$_".Trim() } | Select-Object -First 1)".Trim()
     } catch {
         $line = "did not run: $($_.Exception.Message)"
-    } finally {
-        $ErrorActionPreference = $prevEAP
     }
     return [pscustomobject]@{ Label = $Label; Ok = ($line -match '\d+\.\d+'); Info = $line; Path = $Exe }
 }
