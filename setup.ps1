@@ -2296,7 +2296,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "  1. Check device/inc/ - MCU header should be there"
 Write-Host "  2. Press Ctrl+Shift+B to build"
-Write-Host "  3. Press F5 to debug  (ST-Link / CMSIS-DAP)"
+Write-Host "  3. Press F5 to debug"
 Write-Host ""
 Write-Host "Tip: other MCU projects can reuse the same shared tools folder." -ForegroundColor DarkGray
 Write-Host ""
