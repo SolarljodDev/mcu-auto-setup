@@ -1314,6 +1314,7 @@ if (-not (Test-Path $sdkFlag)) {
             $itHeader = $mcu.Header -replace '\.h$', '_it.h'   # e.g. ch32v30x_it.h
             $itPath   = Join-Path $Root "user\inc\$itHeader"
             if (-not (Test-Path $itPath)) {
+                New-Item -ItemType Directory -Path (Split-Path $itPath) -Force | Out-Null
                 $guard  = ($itHeader -replace '\.', '_').ToUpper()   # CH32V30X_IT_H
                 $itTxt  = "#ifndef __$guard`n#define __$guard`n`n/* Add interrupt handler prototypes here as needed */`n`n#endif /* __$guard */"
                 [System.IO.File]::WriteAllText($itPath, $itTxt, (New-Object System.Text.UTF8Encoding $false))
