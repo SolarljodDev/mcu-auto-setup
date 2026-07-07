@@ -1382,40 +1382,48 @@ if ($mcu.Arch -eq "ARM" -and $mcu.NeedsCmsis) {
 # STEP 4.5: Generate mcu.ld  (linker script)
 # ==============================================================
 
-# --- Optional: custom memory regions (EEPROM emulation, CCMRAM, etc.) ---
-$extraRegions = [System.Collections.Generic.List[hashtable]]::new()
-
-Write-Host ""
-Write-Host "Custom memory regions (e.g. EEPROM emulation, CCMRAM)?" -ForegroundColor Yellow
-Write-Host "  Tip for EEPROM on STM32F103xB (128K, 2 pages at end):" -ForegroundColor DarkGray
-Write-Host "    Name=EEPROM_FLASH  Access=r  Origin=0x0801F800  Size=2  (reduce Flash to 126K above)" -ForegroundColor DarkGray
-$addRegion = Read-Host "Add a custom region? [y/N]"
-while ($addRegion -match '^[Yy]') {
-    $rName = Read-Host "  Region name (e.g. EEPROM_FLASH)"
-    if ([string]::IsNullOrWhiteSpace($rName)) { break }
-    $rAccess = Read-Host "  Access flags (rx / rw / rwx / r)  [r]"
-    if ([string]::IsNullOrWhiteSpace($rAccess)) { $rAccess = "r" }
-    $rOrigin = Read-Host "  Origin address (hex, e.g. 0x0801F800)"
-    if ([string]::IsNullOrWhiteSpace($rOrigin)) { break }
-    $rSizeStr = Read-Host "  Size in KB [2]"
-    $rKB = if ($rSizeStr -match '^\d+$') { [int]$rSizeStr } else { 2 }
-    $extraRegions.Add(@{ Name=$rName; Access=$rAccess; Origin=$rOrigin; LengthKB=$rKB })
-    Write-Host ("  Added: {0} ({1}) @ {2}, {3} KB" -f $rName, $rAccess, $rOrigin, $rKB) -ForegroundColor Green
-    $addRegion = Read-Host "Add another region? [y/N]"
-}
-
 $ldFileName = "${mcuDefine}.ld"
-$ldContent = New-LinkerScript -Arch $mcu.Arch -FlashBase $flashBase -FlashKB $flashKB `
-             -RamBase $ramBase -RamKB $ramKB -ExtraRegions $extraRegions.ToArray()
-[System.IO.File]::WriteAllText("$Root\$ldFileName", $ldContent, (New-Object System.Text.UTF8Encoding $false))
-# Remove old mcu.ld if it exists and is different from the new name
-if ($ldFileName -ne "mcu.ld" -and (Test-Path "$Root\mcu.ld")) {
-    Remove-Item "$Root\mcu.ld" -Force
-    Write-Host "  [cleanup] Removed old mcu.ld (renamed to $ldFileName)" -ForegroundColor DarkGray
+$existingLd = Get-ChildItem $Root -Filter "*.ld" -File -EA SilentlyContinue | Select-Object -First 1
+
+if ($existingLd) {
+    Write-Host ""
+    Write-Host ("[$($existingLd.Name)] Linker script already present - keeping it as-is (custom regions untouched).") -ForegroundColor Green
+    Write-Host "  Delete it and re-run setup.ps1 if you want to regenerate it." -ForegroundColor DarkGray
+} else {
+    # --- Optional: custom memory regions (EEPROM emulation, CCMRAM, etc.) ---
+    $extraRegions = [System.Collections.Generic.List[hashtable]]::new()
+
+    Write-Host ""
+    Write-Host "Custom memory regions (e.g. EEPROM emulation, CCMRAM)?" -ForegroundColor Yellow
+    Write-Host "  Tip for EEPROM on STM32F103xB (128K, 2 pages at end):" -ForegroundColor DarkGray
+    Write-Host "    Name=EEPROM_FLASH  Access=r  Origin=0x0801F800  Size=2  (reduce Flash to 126K above)" -ForegroundColor DarkGray
+    $addRegion = Read-Host "Add a custom region? [y/N]"
+    while ($addRegion -match '^[Yy]') {
+        $rName = Read-Host "  Region name (e.g. EEPROM_FLASH)"
+        if ([string]::IsNullOrWhiteSpace($rName)) { break }
+        $rAccess = Read-Host "  Access flags (rx / rw / rwx / r)  [r]"
+        if ([string]::IsNullOrWhiteSpace($rAccess)) { $rAccess = "r" }
+        $rOrigin = Read-Host "  Origin address (hex, e.g. 0x0801F800)"
+        if ([string]::IsNullOrWhiteSpace($rOrigin)) { break }
+        $rSizeStr = Read-Host "  Size in KB [2]"
+        $rKB = if ($rSizeStr -match '^\d+$') { [int]$rSizeStr } else { 2 }
+        $extraRegions.Add(@{ Name=$rName; Access=$rAccess; Origin=$rOrigin; LengthKB=$rKB })
+        Write-Host ("  Added: {0} ({1}) @ {2}, {3} KB" -f $rName, $rAccess, $rOrigin, $rKB) -ForegroundColor Green
+        $addRegion = Read-Host "Add another region? [y/N]"
+    }
+
+    $ldContent = New-LinkerScript -Arch $mcu.Arch -FlashBase $flashBase -FlashKB $flashKB `
+                 -RamBase $ramBase -RamKB $ramKB -ExtraRegions $extraRegions.ToArray()
+    [System.IO.File]::WriteAllText("$Root\$ldFileName", $ldContent, (New-Object System.Text.UTF8Encoding $false))
+    # Remove old mcu.ld if it exists and is different from the new name
+    if ($ldFileName -ne "mcu.ld" -and (Test-Path "$Root\mcu.ld")) {
+        Remove-Item "$Root\mcu.ld" -Force
+        Write-Host "  [cleanup] Removed old mcu.ld (renamed to $ldFileName)" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    $extraInfo = if ($extraRegions.Count -gt 0) { " + $($extraRegions.Count) custom region(s)" } else { "" }
+    Write-Host ("[$ldFileName] Generated  ({0} KB Flash @ {1},  {2} KB RAM @ {3}{4})" -f $flashKB, $flashBase, $ramKB, $ramBase, $extraInfo) -ForegroundColor Green
 }
-Write-Host ""
-$extraInfo = if ($extraRegions.Count -gt 0) { " + $($extraRegions.Count) custom region(s)" } else { "" }
-Write-Host ("[$ldFileName] Generated  ({0} KB Flash @ {1},  {2} KB RAM @ {3}{4})" -f $flashKB, $flashBase, $ramKB, $ramBase, $extraInfo) -ForegroundColor Green
 
 # Paths used by scaffolding (STEP 4.7) and tool_paths.cmake (STEP 5)
 $gccBinFwd = $gccBin.Replace('\', '/')
@@ -1696,6 +1704,20 @@ foreach ($ln in Get-Content "$root\cmake\tool_paths.cmake" -EA SilentlyContinue)
 }
 if (-not $cmakeExe) { $c = Get-Command cmake -EA SilentlyContinue; if ($c) { $cmakeExe = $c.Source } }
 if (-not $cmakeExe) { Write-Host 'cmake not found - run setup.ps1' -ForegroundColor Red; exit 1 }
+
+# Wipe stale build dir: on -Clean, or if CMakeCache.txt was generated from a
+# different path (e.g. project folder moved/re-cloned) - CMake refuses to
+# reconfigure in that case instead of just fixing it up.
+$cacheFile = "$buildDir\CMakeCache.txt"
+$staleCache = $false
+if (Test-Path $cacheFile) {
+    $cacheLine = Get-Content $cacheFile -EA SilentlyContinue | Select-String '^# For build in directory: (.+)$'
+    if ($cacheLine -and $cacheLine.Matches[0].Groups[1].Value -ne $buildDir.Replace('\','/')) { $staleCache = $true }
+}
+if ($Clean -or $staleCache) {
+    if ($staleCache) { Write-Host 'Build dir was generated from a different path - wiping it.' -ForegroundColor Yellow }
+    Remove-Item $buildDir -Recurse -Force -EA SilentlyContinue
+}
 
 # Configure (silent; only warnings/errors printed)
 $confArgs = @('-S',$root, '-B',$buildDir, '-G','Ninja',
