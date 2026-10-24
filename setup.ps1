@@ -1741,8 +1741,16 @@ if (-not $cmakeExe) { Write-Host 'cmake not found - run setup.ps1' -ForegroundCo
 $cacheFile = "$buildDir\CMakeCache.txt"
 $staleCache = $false
 if (Test-Path $cacheFile) {
-    $cacheLine = Get-Content $cacheFile -EA SilentlyContinue | Select-String '^# For build in directory: (.+)$'
-    if ($cacheLine -and $cacheLine.Matches[0].Groups[1].Value -ne $buildDir.Replace('\','/')) { $staleCache = $true }
+    # CMakeCache.txt is UTF-8. Windows PowerShell 5.1 otherwise decodes it using
+    # the active ANSI code page, corrupting non-ASCII paths and causing a false stale-cache match.
+    $cacheLine = Get-Content $cacheFile -Encoding UTF8 -EA SilentlyContinue | Select-String '^# For build in directory: (.+)$'
+    if ($cacheLine) {
+        $cachedBuildDir   = $cacheLine.Matches[0].Groups[1].Value.Replace('\','/').TrimEnd('/')
+        $expectedBuildDir = [System.IO.Path]::GetFullPath($buildDir).Replace('\','/').TrimEnd('/')
+        if (-not [string]::Equals($cachedBuildDir, $expectedBuildDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $staleCache = $true
+        }
+    }
 }
 if ($Clean -or $staleCache) {
     if ($staleCache) { Write-Host 'Build dir was generated from a different path - wiping it.' -ForegroundColor Yellow }
